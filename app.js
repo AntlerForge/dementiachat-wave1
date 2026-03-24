@@ -95,6 +95,7 @@ async function init() {
   await loadMessages();
   render();
   startOutboxSyncLoop();
+  startMessageRefreshLoop();
   setupServiceWorker();
 }
 
@@ -1013,6 +1014,19 @@ function startOutboxSyncLoop() {
   }, ms);
 }
 
+function startMessageRefreshLoop() {
+  const ms = Number(config.MESSAGE_POLL_MS || 2500);
+  setInterval(async () => {
+    if (!supabase || !state.session || state.authRequired || !state.conversationId) return;
+    const beforeSig = messagesSignature(state.messages);
+    await loadMessages();
+    const afterSig = messagesSignature(state.messages);
+    if (beforeSig !== afterSig && !isUserEditingControl()) {
+      render();
+    }
+  }, ms);
+}
+
 function isUserEditingControl() {
   const active = document.activeElement;
   if (!active) return false;
@@ -1051,6 +1065,14 @@ function outboxSummary() {
     .replace(/\s+/g, " ")
     .slice(0, 120);
   return `Outbox (${mode}): ${sending} sending, ${failed} failed. Last error: ${latestErr}`;
+}
+
+function messagesSignature(messages) {
+  if (!Array.isArray(messages) || !messages.length) return "empty";
+  const last = messages[messages.length - 1];
+  return `${messages.length}|${last.id}|${last.updated_at || last.created_at || ""}|${
+    last.hidden_for_dad ? 1 : 0
+  }`;
 }
 
 function readJson(key, fallback) {
