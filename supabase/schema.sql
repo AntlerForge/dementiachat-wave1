@@ -1,0 +1,713 @@
+-- Wave 1 schema for Care Chat.
+-- Trust Levels 1-3 only. Levels 4-5 stay deferred.
+
+create extension if not exists "pgcrypto";
+
+create table if not exists profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  role text not null check (role in ('dad', 'caregiver')),
+  display_name text not null default '',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists conversations (
+  id uuid primary key default gen_random_uuid(),
+  created_by uuid not null references profiles(id),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists conversation_members (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  user_id uuid not null references profiles(id) on delete cascade,
+  member_role text not null check (member_role in ('dad', 'caregiver_admin', 'caregiver')),
+  created_at timestamptz not null default now(),
+  unique (conversation_id, user_id)
+);
+
+create table if not exists messages (
+  id uuid primary key default gen_random_uuid(),
+  client_msg_id uuid unique,
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  sender_id uuid references profiles(id),
+  sender_role text not null check (sender_role in ('dad', 'caregiver', 'system')),
+  content text,
+  image_url text,
+  image_size text check (image_size in ('small', 'medium', 'large')),
+  hidden_for_dad boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists idx_messages_conversation_created
+  on messages(conversation_id, created_at desc);
+
+create table if not exists message_revisions (
+  id uuid primary key default gen_random_uuid(),
+  message_id uuid not null references messages(id) on delete cascade,
+  edited_by uuid not null references profiles(id),
+  previous_content text,
+  next_content text,
+  hidden_for_dad boolean not null default false,
+  reason text default '',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_message_revisions_message
+  on message_revisions(message_id, created_at desc);
+
+create table if not exists dad_ui_profiles (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null unique references conversations(id) on delete cascade,
+  font_scale integer not null default 22 check (font_scale between 16 and 34),
+  theme text not null default 'high-contrast' check (theme in ('high-contrast', 'warm', 'dark')),
+  bubble_width integer not null default 80 check (bubble_width between 60 and 95),
+  image_default_size text not null default 'medium' check (image_default_size in ('small', 'medium', 'large')),
+  draft_font_scale integer check (draft_font_scale between 16 and 34),
+  draft_theme text check (draft_theme in ('high-contrast', 'warm', 'dark')),
+  draft_bubble_width integer check (draft_bubble_width between 60 and 95),
+  draft_image_default_size text check (draft_image_default_size in ('small', 'medium', 'large')),
+  draft_updated_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists trust_rules (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null unique references conversations(id) on delete cascade,
+  trust_level integer not null default 1 check (trust_level between 1 and 3),
+  delayed_auto_seconds integer not null default 180 check (delayed_auto_seconds between 30 and 900),
+  level3_checklist_confirmed boolean not null default false,
+  updated_by uuid references profiles(id),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists delayed_outbox (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  source_message_id uuid references messages(id) on delete cascade,
+  idempotency_key text not null unique,
+  scheduled_for timestamptz not null,
+  status text not null default 'pending' check (status in ('pending', 'claimed', 'sent', 'cancelled', 'failed')),
+  claimed_at timestamptz,
+  sent_at timestamptz,
+  failure_reason text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_delayed_outbox_pending_schedule
+  on delayed_outbox(status, scheduled_for);
+
+create table if not exists activity_events (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  actor_id uuid references profiles(id),
+  event_type text not null,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+-- Auto profile bootstrap from auth metadata.
+create or replace function ensure_profile(
+  p_role text default 'caregiver',
+  p_display_name text default ''
+)
+returns profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_profile profiles;
+  v_role text;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  v_role := case when p_role in ('dad', 'caregiver') then p_role else 'caregiver' end;
+
+  insert into profiles (id, role, display_name)
+  values (auth.uid(), v_role, coalesce(p_display_name, ''))
+  on conflict (id) do update
+    set role = excluded.role,
+        display_name = case
+          when excluded.display_name = '' then profiles.display_name
+          else excluded.display_name
+        end
+  returning * into v_profile;
+
+  return v_profile;
+end;
+$$;
+
+-- Create or join a conversation for the current user.
+create or replace function create_or_join_conversation(
+  p_conversation_id uuid default null,
+  p_member_role text default 'caregiver_admin'
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_conversation_id uuid;
+  v_role text;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  v_role := case
+    when p_member_role in ('dad', 'caregiver', 'caregiver_admin') then p_member_role
+    else 'caregiver_admin'
+  end;
+
+  if p_conversation_id is null then
+    insert into conversations (created_by)
+    values (auth.uid())
+    returning id into v_conversation_id;
+  else
+    v_conversation_id := p_conversation_id;
+    if not exists (select 1 from conversations c where c.id = v_conversation_id) then
+      insert into conversations (id, created_by)
+      values (v_conversation_id, auth.uid());
+    end if;
+  end if;
+
+  insert into conversation_members (conversation_id, user_id, member_role)
+  values (v_conversation_id, auth.uid(), v_role)
+  on conflict (conversation_id, user_id) do update
+    set member_role = excluded.member_role;
+
+  return v_conversation_id;
+end;
+$$;
+
+create or replace function list_my_conversations()
+returns table (
+  conversation_id uuid,
+  member_role text
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select cm.conversation_id, cm.member_role
+  from conversation_members cm
+  where cm.user_id = auth.uid()
+  order by cm.created_at asc;
+$$;
+
+-- Revision-safe edit/hide operation.
+create or replace function caregiver_edit_message(
+  p_message_id uuid,
+  p_next_content text,
+  p_hide_for_dad boolean default false,
+  p_reason text default ''
+)
+returns messages
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_msg messages;
+begin
+  select * into v_msg
+  from messages m
+  where m.id = p_message_id
+  for update;
+
+  if not found then
+    raise exception 'Message not found';
+  end if;
+
+  if not is_caregiver_admin(v_msg.conversation_id) then
+    raise exception 'Not authorized';
+  end if;
+
+  insert into message_revisions (message_id, edited_by, previous_content, next_content, hidden_for_dad, reason)
+  values (
+    v_msg.id,
+    auth.uid(),
+    v_msg.content,
+    p_next_content,
+    p_hide_for_dad,
+    coalesce(p_reason, '')
+  );
+
+  update messages
+  set content = p_next_content,
+      hidden_for_dad = p_hide_for_dad
+  where id = v_msg.id
+  returning * into v_msg;
+
+  return v_msg;
+end;
+$$;
+
+create or replace function save_dad_ui_draft(
+  p_conversation_id uuid,
+  p_font_scale integer,
+  p_theme text,
+  p_bubble_width integer,
+  p_image_default_size text
+)
+returns dad_ui_profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_profile dad_ui_profiles;
+begin
+  if not is_caregiver_admin(p_conversation_id) then
+    raise exception 'Not authorized';
+  end if;
+
+  insert into dad_ui_profiles (
+    conversation_id,
+    draft_font_scale,
+    draft_theme,
+    draft_bubble_width,
+    draft_image_default_size,
+    draft_updated_at
+  )
+  values (
+    p_conversation_id,
+    p_font_scale,
+    p_theme,
+    p_bubble_width,
+    p_image_default_size,
+    now()
+  )
+  on conflict (conversation_id) do update
+  set draft_font_scale = excluded.draft_font_scale,
+      draft_theme = excluded.draft_theme,
+      draft_bubble_width = excluded.draft_bubble_width,
+      draft_image_default_size = excluded.draft_image_default_size,
+      draft_updated_at = now()
+  returning * into v_profile;
+
+  return v_profile;
+end;
+$$;
+
+create or replace function apply_dad_ui_draft(p_conversation_id uuid)
+returns dad_ui_profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_profile dad_ui_profiles;
+begin
+  if not is_caregiver_admin(p_conversation_id) then
+    raise exception 'Not authorized';
+  end if;
+
+  update dad_ui_profiles
+  set font_scale = coalesce(draft_font_scale, font_scale),
+      theme = coalesce(draft_theme, theme),
+      bubble_width = coalesce(draft_bubble_width, bubble_width),
+      image_default_size = coalesce(draft_image_default_size, image_default_size),
+      draft_font_scale = null,
+      draft_theme = null,
+      draft_bubble_width = null,
+      draft_image_default_size = null,
+      draft_updated_at = null,
+      updated_at = now()
+  where conversation_id = p_conversation_id
+  returning * into v_profile;
+
+  if not found then
+    raise exception 'Dad UI profile not found';
+  end if;
+
+  insert into activity_events (conversation_id, actor_id, event_type, payload)
+  values (p_conversation_id, auth.uid(), 'dad_ui_applied', '{}'::jsonb);
+
+  return v_profile;
+end;
+$$;
+
+create or replace function save_trust_rules(
+  p_conversation_id uuid,
+  p_trust_level integer,
+  p_delayed_auto_seconds integer,
+  p_checklist_confirmed boolean
+)
+returns trust_rules
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_rules trust_rules;
+begin
+  if not is_caregiver_admin(p_conversation_id) then
+    raise exception 'Not authorized';
+  end if;
+
+  if p_trust_level < 1 or p_trust_level > 3 then
+    raise exception 'Trust level out of Wave 1 range';
+  end if;
+
+  insert into trust_rules (conversation_id, trust_level, delayed_auto_seconds, level3_checklist_confirmed, updated_by)
+  values (p_conversation_id, p_trust_level, p_delayed_auto_seconds, p_checklist_confirmed, auth.uid())
+  on conflict (conversation_id) do update
+  set trust_level = excluded.trust_level,
+      delayed_auto_seconds = excluded.delayed_auto_seconds,
+      level3_checklist_confirmed = excluded.level3_checklist_confirmed,
+      updated_by = auth.uid(),
+      updated_at = now()
+  returning * into v_rules;
+
+  return v_rules;
+end;
+$$;
+
+create or replace function queue_delayed_auto(
+  p_conversation_id uuid,
+  p_source_message_id uuid,
+  p_delay_seconds integer,
+  p_idempotency_key text
+)
+returns delayed_outbox
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row delayed_outbox;
+begin
+  if not is_conversation_member(p_conversation_id) then
+    raise exception 'Not authorized';
+  end if;
+
+  insert into delayed_outbox (
+    conversation_id,
+    source_message_id,
+    idempotency_key,
+    scheduled_for,
+    status
+  )
+  values (
+    p_conversation_id,
+    p_source_message_id,
+    p_idempotency_key,
+    now() + make_interval(secs => p_delay_seconds),
+    'pending'
+  )
+  on conflict (idempotency_key) do update
+    set conversation_id = excluded.conversation_id
+  returning * into v_row;
+
+  return v_row;
+end;
+$$;
+
+create or replace function worker_claim_due_outbox(p_limit integer default 20)
+returns setof delayed_outbox
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  return query
+  with candidate as (
+    select d.id
+    from delayed_outbox d
+    where d.status = 'pending'
+      and d.scheduled_for <= now()
+    order by d.scheduled_for asc
+    limit greatest(1, p_limit)
+    for update skip locked
+  )
+  update delayed_outbox d
+  set status = 'claimed',
+      claimed_at = now()
+  from candidate c
+  where d.id = c.id
+  returning d.*;
+end;
+$$;
+
+create or replace function worker_mark_outbox_sent(
+  p_outbox_id uuid,
+  p_system_message_content text
+)
+returns delayed_outbox
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row delayed_outbox;
+begin
+  update delayed_outbox
+  set status = 'sent',
+      sent_at = now()
+  where id = p_outbox_id
+    and status = 'claimed'
+  returning * into v_row;
+
+  if not found then
+    raise exception 'Outbox row not claimed';
+  end if;
+
+  insert into messages (
+    conversation_id,
+    sender_role,
+    content
+  )
+  values (
+    v_row.conversation_id,
+    'system',
+    p_system_message_content
+  );
+
+  insert into activity_events (conversation_id, event_type, payload)
+  values (
+    v_row.conversation_id,
+    'delayed_auto_sent',
+    jsonb_build_object('outbox_id', v_row.id)
+  );
+
+  return v_row;
+end;
+$$;
+
+create or replace function worker_mark_outbox_failed(
+  p_outbox_id uuid,
+  p_reason text
+)
+returns delayed_outbox
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row delayed_outbox;
+begin
+  update delayed_outbox
+  set status = 'failed',
+      failure_reason = left(coalesce(p_reason, ''), 500)
+  where id = p_outbox_id
+    and status in ('claimed', 'pending')
+  returning * into v_row;
+  return v_row;
+end;
+$$;
+
+create or replace function worker_cancel_outbox(p_outbox_id uuid, p_reason text default 'cancelled_by_caregiver_activity')
+returns delayed_outbox
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row delayed_outbox;
+begin
+  update delayed_outbox
+  set status = 'cancelled',
+      failure_reason = left(coalesce(p_reason, ''), 500)
+  where id = p_outbox_id
+    and status in ('pending', 'claimed')
+  returning * into v_row;
+  return v_row;
+end;
+$$;
+
+-- Helpful trigger for message updated_at.
+create or replace function set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_messages_updated_at on messages;
+create trigger trg_messages_updated_at
+before update on messages
+for each row execute function set_updated_at();
+
+-- RLS scaffolding.
+alter table profiles enable row level security;
+alter table conversations enable row level security;
+alter table conversation_members enable row level security;
+alter table messages enable row level security;
+alter table message_revisions enable row level security;
+alter table dad_ui_profiles enable row level security;
+alter table trust_rules enable row level security;
+alter table delayed_outbox enable row level security;
+alter table activity_events enable row level security;
+
+create or replace function is_conversation_member(_conversation_id uuid)
+returns boolean
+language sql
+stable
+as $$
+  select exists (
+    select 1
+    from conversation_members cm
+    where cm.conversation_id = _conversation_id
+      and cm.user_id = auth.uid()
+  );
+$$;
+
+create or replace function is_caregiver_admin(_conversation_id uuid)
+returns boolean
+language sql
+stable
+as $$
+  select exists (
+    select 1
+    from conversation_members cm
+    where cm.conversation_id = _conversation_id
+      and cm.user_id = auth.uid()
+      and cm.member_role = 'caregiver_admin'
+  );
+$$;
+
+-- Core policies: members can read their conversation data.
+drop policy if exists p_messages_select on messages;
+create policy p_messages_select
+on messages
+for select
+using (is_conversation_member(conversation_id));
+
+drop policy if exists p_messages_insert on messages;
+create policy p_messages_insert
+on messages
+for insert
+with check (is_conversation_member(conversation_id));
+
+drop policy if exists p_messages_update_caregiver on messages;
+create policy p_messages_update_caregiver
+on messages
+for update
+using (is_caregiver_admin(conversation_id))
+with check (is_caregiver_admin(conversation_id));
+
+drop policy if exists p_message_revisions_rw on message_revisions;
+create policy p_message_revisions_rw
+on message_revisions
+for all
+using (
+  exists (
+    select 1
+    from messages m
+    where m.id = message_revisions.message_id
+      and is_caregiver_admin(m.conversation_id)
+  )
+)
+with check (
+  exists (
+    select 1
+    from messages m
+    where m.id = message_revisions.message_id
+      and is_caregiver_admin(m.conversation_id)
+  )
+);
+
+drop policy if exists p_ui_profiles_select on dad_ui_profiles;
+create policy p_ui_profiles_select
+on dad_ui_profiles
+for select
+using (is_conversation_member(conversation_id));
+
+drop policy if exists p_ui_profiles_update on dad_ui_profiles;
+create policy p_ui_profiles_update
+on dad_ui_profiles
+for all
+using (is_caregiver_admin(conversation_id))
+with check (is_caregiver_admin(conversation_id));
+
+drop policy if exists p_trust_rules_select on trust_rules;
+create policy p_trust_rules_select
+on trust_rules
+for select
+using (is_conversation_member(conversation_id));
+
+drop policy if exists p_trust_rules_update on trust_rules;
+create policy p_trust_rules_update
+on trust_rules
+for all
+using (is_caregiver_admin(conversation_id))
+with check (is_caregiver_admin(conversation_id));
+
+drop policy if exists p_delayed_outbox_read on delayed_outbox;
+create policy p_delayed_outbox_read
+on delayed_outbox
+for select
+using (is_conversation_member(conversation_id));
+
+drop policy if exists p_delayed_outbox_write on delayed_outbox;
+create policy p_delayed_outbox_write
+on delayed_outbox
+for all
+using (is_caregiver_admin(conversation_id))
+with check (is_caregiver_admin(conversation_id));
+
+drop policy if exists p_profiles_select_self on profiles;
+create policy p_profiles_select_self
+on profiles
+for select
+using (id = auth.uid());
+
+drop policy if exists p_profiles_insert_self on profiles;
+create policy p_profiles_insert_self
+on profiles
+for insert
+with check (id = auth.uid());
+
+drop policy if exists p_profiles_update_self on profiles;
+create policy p_profiles_update_self
+on profiles
+for update
+using (id = auth.uid())
+with check (id = auth.uid());
+
+drop policy if exists p_conversations_select on conversations;
+create policy p_conversations_select
+on conversations
+for select
+using (is_conversation_member(id));
+
+drop policy if exists p_conversations_insert_self on conversations;
+create policy p_conversations_insert_self
+on conversations
+for insert
+with check (created_by = auth.uid());
+
+drop policy if exists p_conversation_members_select on conversation_members;
+create policy p_conversation_members_select
+on conversation_members
+for select
+using (is_conversation_member(conversation_id));
+
+drop policy if exists p_conversation_members_insert_self on conversation_members;
+create policy p_conversation_members_insert_self
+on conversation_members
+for insert
+with check (
+  user_id = auth.uid()
+  or is_caregiver_admin(conversation_id)
+);
+
+drop policy if exists p_activity_events_select on activity_events;
+create policy p_activity_events_select
+on activity_events
+for select
+using (is_conversation_member(conversation_id));
+
+drop policy if exists p_activity_events_insert on activity_events;
+create policy p_activity_events_insert
+on activity_events
+for insert
+with check (is_conversation_member(conversation_id));
