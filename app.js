@@ -818,7 +818,7 @@ function renderBubble(msg) {
   const meta = document.createElement("div");
   meta.className = "meta";
   const hidden = msg.hidden_for_dad ? " hidden-for-dad" : "";
-  meta.textContent = `${msg.sender_role} · ${formatTime(msg.created_at)}${hidden}`;
+  meta.textContent = `${senderLabel(msg.sender_role)} · ${formatTime(msg.created_at)}${hidden}`;
   bubble.appendChild(meta);
   return bubble;
 }
@@ -1180,6 +1180,12 @@ function formatTime(iso) {
 function truncate(value, n) {
   if (!value) return "";
   return value.length > n ? `${value.slice(0, n - 1)}...` : value;
+}
+
+function senderLabel(senderRole) {
+  if (senderRole === "caregiver") return "Tony";
+  if (senderRole === "dad") return "Dad";
+  return "System";
 }
 
 function readFileAsDataUrl(file) {
