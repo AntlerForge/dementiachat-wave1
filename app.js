@@ -18,6 +18,7 @@ const DAD_UI_DRAFT_KEY = "carechat.dad_ui_draft";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
+const rolePicker = document.querySelector(".role-picker");
 
 const config = window.APP_CONFIG || {};
 const urlParams = new URLSearchParams(window.location.search);
@@ -62,6 +63,7 @@ const state = {
     imageSize: "medium",
   }),
   previewDadUI: readJson(DAD_UI_DRAFT_KEY, null),
+  roleLockEnabled: false,
   trustRules: readJson(TRUST_KEY, {
     trustLevel: 1,
     delaySeconds: config.DEFAULT_DELAY_SECONDS || 180,
@@ -92,6 +94,7 @@ async function init() {
     });
   }
   await bootstrapRemote();
+  enforceRoleLock();
   await loadMessages();
   render();
   startOutboxSyncLoop();
@@ -229,7 +232,10 @@ async function loadRemoteSettings() {
       bubbleWidth: uiData.bubble_width,
       imageSize: uiData.image_default_size || "medium",
     };
+    state.roleLockEnabled = Boolean(uiData.role_lock_enabled);
     localStorage.setItem(DAD_UI_KEY, JSON.stringify(state.appliedDadUI));
+  } else {
+    state.roleLockEnabled = false;
   }
 
   if (trustData) {
@@ -244,11 +250,16 @@ async function loadRemoteSettings() {
 
 function onRoleChange(event) {
   state.role = event.target.value;
+  if (isDadRoleLocked()) {
+    state.role = "dad";
+    roleSelect.value = "dad";
+  }
   localStorage.setItem(ROLE_KEY, state.role);
   render();
 }
 
 function render() {
+  enforceRoleLock();
   appRoot.innerHTML = "";
   if (state.authRequired) {
     renderAuthGate();
@@ -647,14 +658,17 @@ function wireDadUiPane(root) {
   const bubbleWidth = root.getElementById("bubbleWidth");
   const previewBtn = root.getElementById("previewSettings");
   const applyBtn = root.getElementById("applySettings");
+  const lockDadRole = root.getElementById("lockDadRole");
   const note = root.getElementById("previewNote");
   const previewThread = root.getElementById("dadUiPreviewThread");
-  if (!fontScale || !theme || !bubbleWidth || !previewBtn || !applyBtn || !note) return;
+  if (!fontScale || !theme || !bubbleWidth || !previewBtn || !applyBtn || !note || !lockDadRole)
+    return;
 
   const currentDraft = state.previewDadUI || { ...state.appliedDadUI };
   fontScale.value = String(currentDraft.fontScale);
   theme.value = currentDraft.theme;
   bubbleWidth.value = String(currentDraft.bubbleWidth);
+  lockDadRole.checked = Boolean(state.roleLockEnabled);
 
   const saveDraftFromControls = () => {
     state.previewDadUI = {
@@ -663,6 +677,7 @@ function wireDadUiPane(root) {
       bubbleWidth: Number(bubbleWidth.value),
       imageSize: state.appliedDadUI.imageSize || "medium",
     };
+    state.roleLockEnabled = lockDadRole.checked;
     localStorage.setItem(DAD_UI_DRAFT_KEY, JSON.stringify(state.previewDadUI));
   };
 
@@ -707,6 +722,7 @@ function wireDadUiPane(root) {
           p_theme: state.previewDadUI.theme,
           p_bubble_width: state.previewDadUI.bubbleWidth,
           p_image_default_size: state.previewDadUI.imageSize || "medium",
+          p_role_lock_enabled: state.roleLockEnabled,
         });
         if (saveErr) throw saveErr;
         const { error: applyErr } = await supabase.rpc("apply_dad_ui_draft", {
@@ -716,6 +732,7 @@ function wireDadUiPane(root) {
       }
       state.appliedDadUI = { ...state.previewDadUI };
       localStorage.setItem(DAD_UI_KEY, JSON.stringify(state.appliedDadUI));
+      enforceRoleLock();
       note.textContent = "Applied to Dad.";
     } catch (err) {
       note.textContent = `Apply failed: ${err.message}`;
@@ -1025,6 +1042,21 @@ function startMessageRefreshLoop() {
       render();
     }
   }, ms);
+}
+
+function isDadRoleLocked() {
+  return Boolean(state.roleLockEnabled && state.profile?.role === "dad");
+}
+
+function enforceRoleLock() {
+  if (isDadRoleLocked()) {
+    state.role = "dad";
+    roleSelect.value = "dad";
+    if (rolePicker) rolePicker.style.display = "none";
+    localStorage.setItem(ROLE_KEY, "dad");
+    return;
+  }
+  if (rolePicker) rolePicker.style.display = "";
 }
 
 function isUserEditingControl() {
