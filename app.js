@@ -717,6 +717,10 @@ function wireDadUiPane(root) {
     updatePreview();
     note.textContent = "Draft updated. Click 'Apply to Dad' when ready.";
   });
+  lockDadRole.addEventListener("change", () => {
+    state.roleLockEnabled = lockDadRole.checked;
+    note.textContent = "Role lock draft updated. Click 'Apply to Dad' when ready.";
+  });
 
   previewBtn.addEventListener("click", () => {
     saveDraftFromControls();
@@ -731,15 +735,9 @@ function wireDadUiPane(root) {
       return;
     }
     try {
+      saveDraftFromControls();
       if (supabase && state.conversationId) {
-        const { error: saveErr } = await supabase.rpc("save_dad_ui_draft", {
-          p_conversation_id: state.conversationId,
-          p_font_scale: state.previewDadUI.fontScale,
-          p_theme: state.previewDadUI.theme,
-          p_bubble_width: state.previewDadUI.bubbleWidth,
-          p_image_default_size: state.previewDadUI.imageSize || "medium",
-          p_role_lock_enabled: state.roleLockEnabled,
-        });
+        const { error: saveErr } = await saveDadUiDraftCompat();
         if (saveErr) throw saveErr;
         const { error: applyErr } = await supabase.rpc("apply_dad_ui_draft", {
           p_conversation_id: state.conversationId,
@@ -756,6 +754,33 @@ function wireDadUiPane(root) {
   });
 
   updatePreview();
+}
+
+async function saveDadUiDraftCompat() {
+  const payloadV2 = {
+    p_conversation_id: state.conversationId,
+    p_font_scale: state.previewDadUI.fontScale,
+    p_theme: state.previewDadUI.theme,
+    p_bubble_width: state.previewDadUI.bubbleWidth,
+    p_image_default_size: state.previewDadUI.imageSize || "medium",
+    p_role_lock_enabled: state.roleLockEnabled,
+  };
+  const v2 = await supabase.rpc("save_dad_ui_draft", payloadV2);
+  if (!v2.error) return v2;
+
+  const msg = String(v2.error.message || "").toLowerCase();
+  const missingSig = msg.includes("could not find the function") || msg.includes("schema cache");
+  if (!missingSig) return v2;
+
+  // Backward-compatible fallback for older deployed schema without role lock arg.
+  const payloadV1 = {
+    p_conversation_id: state.conversationId,
+    p_font_scale: state.previewDadUI.fontScale,
+    p_theme: state.previewDadUI.theme,
+    p_bubble_width: state.previewDadUI.bubbleWidth,
+    p_image_default_size: state.previewDadUI.imageSize || "medium",
+  };
+  return supabase.rpc("save_dad_ui_draft", payloadV1);
 }
 
 function wireAiRulesPane(root) {
@@ -1061,7 +1086,9 @@ function startMessageRefreshLoop() {
 }
 
 function isDadRoleLocked() {
-  return Boolean(state.roleLockEnabled && state.profile?.role === "dad");
+  return Boolean(
+    state.roleLockEnabled && (state.profile?.role === "dad" || state.roleHint === "dad")
+  );
 }
 
 function enforceRoleLock() {
