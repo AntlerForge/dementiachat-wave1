@@ -74,6 +74,8 @@ const state = {
     lastCallback: "none",
     lastError: "",
   },
+  dadVisibleMessageCount: 0,
+  caregiverVisibleMessageCount: 0,
 };
 
 init().catch((err) => {
@@ -461,8 +463,10 @@ function renderDadView() {
 
   applyDadUiTokens(thread, state.appliedDadUI);
 
+  let visibleCount = 0;
   for (const msg of state.messages) {
     if (msg.hidden_for_dad) continue;
+    visibleCount += 1;
     thread.appendChild(renderBubble(msg));
   }
 
@@ -479,6 +483,10 @@ function renderDadView() {
   });
 
   appRoot.appendChild(node);
+  if (visibleCount > state.dadVisibleMessageCount) {
+    scrollThreadToBottom(thread);
+  }
+  state.dadVisibleMessageCount = visibleCount;
 }
 
 function renderCaregiverView() {
@@ -496,8 +504,10 @@ function renderCaregiverView() {
   const tabs = node.getElementById("tabs");
   const outboxStatus = node.getElementById("outboxStatus");
 
+  let visibleCount = 0;
   for (const msg of state.messages) {
     if (msg.hidden_for_dad) continue;
+    visibleCount += 1;
     thread.appendChild(renderBubble(msg));
   }
 
@@ -541,6 +551,10 @@ function renderCaregiverView() {
 
   outboxStatus.textContent = outboxSummary();
   appRoot.appendChild(node);
+  if (visibleCount > state.caregiverVisibleMessageCount) {
+    scrollThreadToBottom(thread);
+  }
+  state.caregiverVisibleMessageCount = visibleCount;
 }
 
 function wireImageSize(root) {
@@ -1115,6 +1129,13 @@ function messagesSignature(messages) {
   return `${messages.length}|${last.id}|${last.updated_at || last.created_at || ""}|${
     last.hidden_for_dad ? 1 : 0
   }`;
+}
+
+function scrollThreadToBottom(threadEl) {
+  if (!threadEl) return;
+  requestAnimationFrame(() => {
+    threadEl.scrollTop = threadEl.scrollHeight;
+  });
 }
 
 function dadUiSignature(ui) {
