@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0f172a" />
+    <title>Care Chat Wave 1</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Care Chat</h1>
+      <div class="role-picker">
+        <label for="role">Role</label>
+        <select id="role">
+          <option value="dad">Dad View</option>
+          <option value="caregiver">Caregiver View</option>
+        </select>
+      </div>
+    </header>
+
+    <main id="app"></main>
+
+    <template id="dad-view-template">
+      <section class="panel">
+        <h2>Dad View (Simple)</h2>
+        <p class="subtext">One conversation only.</p>
+        <div id="dadThread" class="thread"></div>
+        <form id="dadComposer" class="composer">
+          <input id="dadInput" autocomplete="off" placeholder="Type message..." />
+          <button type="submit">Send</button>
+        </form>
+      </section>
+    </template>
+
+    <template id="caregiver-view-template">
+      <section class="panel">
+        <h2>Caregiver View</h2>
+        <nav class="tabs" id="tabs">
+          <button data-tab="chat" class="active">Chat</button>
+          <button data-tab="dad-ui">Dad UI</button>
+          <button data-tab="ai-rules">AI Rules</button>
+        </nav>
+
+        <section data-pane="chat" class="pane active">
+          <div id="caregiverThread" class="thread"></div>
+          <form id="caregiverComposer" class="composer">
+            <input id="caregiverInput" autocomplete="off" placeholder="Reply to Dad..." />
+            <button type="submit">Send</button>
+          </form>
+          <div class="row">
+            <label for="caregiverImageFile">Photo to send</label>
+            <input id="caregiverImageFile" type="file" accept="image/*" />
+            <div class="row image-actions">
+              <button id="sendCaregiverImage" type="button">Send Photo</button>
+              <button id="clearCaregiverImage" type="button">Clear</button>
+            </div>
+            <img id="caregiverImagePreview" class="image-preview" alt="Selected photo preview" />
+            <p id="imageStatus" class="status"></p>
+          </div>
+          <div class="row">
+            <label>Image size</label>
+            <select id="imageSize">
+              <option value="small">Small</option>
+              <option value="medium" selected>Medium</option>
+              <option value="large">Large</option>
+            </select>
+          </div>
+          <div id="editQueue" class="queue"></div>
+          <div id="outboxStatus" class="status"></div>
+        </section>
+
+        <section data-pane="dad-ui" class="pane">
+          <div class="row">
+            <label for="fontScale">Font size</label>
+            <input id="fontScale" type="range" min="16" max="34" value="22" />
+          </div>
+          <div class="row">
+            <label for="theme">Theme</label>
+            <select id="theme">
+              <option value="high-contrast">High contrast</option>
+              <option value="warm">Warm soft</option>
+              <option value="dark">Dark high contrast</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="bubbleWidth">Bubble width</label>
+            <input id="bubbleWidth" type="range" min="60" max="95" value="80" />
+          </div>
+          <button id="previewSettings">Preview in this panel</button>
+          <button id="applySettings">Apply to Dad</button>
+          <div class="row dad-ui-preview">
+            <label>Preview (caregiver only)</label>
+            <div id="dadUiPreviewThread" class="thread">
+              <article class="bubble">Sample message to Dad</article>
+              <article class="bubble me">Sample reply from caregiver</article>
+            </div>
+          </div>
+          <p id="previewNote" class="status"></p>
+        </section>
+
+        <section data-pane="ai-rules" class="pane">
+          <div class="row">
+            <label for="trustLevel">Trust level</label>
+            <select id="trustLevel">
+              <option value="1">1 - Manual</option>
+              <option value="2">2 - Suggested</option>
+              <option value="3">3 - Delayed Auto</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="delaySeconds">Delayed auto seconds</label>
+            <input id="delaySeconds" type="number" min="30" max="900" value="180" />
+          </div>
+          <button id="saveRules">Save Rules</button>
+          <p class="subtext">Level 3 sends only after timeout and only once (idempotent behavior expected server-side).</p>
+          <p id="rulesStatus" class="status"></p>
+        </section>
+      </section>
+    </template>
+
+    <script src="./config.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
