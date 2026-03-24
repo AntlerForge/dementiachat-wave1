@@ -897,6 +897,9 @@ async function sendRemote(msg) {
     localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(local));
     return;
   }
+  if (!msg.conversation_id) {
+    throw new Error("No conversation selected for send.");
+  }
   const payload = {
     client_msg_id: msg.client_msg_id,
     conversation_id: msg.conversation_id,
@@ -906,8 +909,17 @@ async function sendRemote(msg) {
     image_size: msg.image_size,
     hidden_for_dad: false,
   };
-  const { error } = await supabase.from("messages").insert(payload);
-  if (error) throw error.message;
+  const insertOnce = async () => supabase.from("messages").insert(payload);
+  let { error } = await insertOnce();
+  if (error && shouldRetryAfterMembershipRepair(error)) {
+    await ensureConversationMembership(msg.conversation_id);
+    const retry = await insertOnce();
+    error = retry.error;
+  }
+  if (error) {
+    const code = error.code ? `[${error.code}] ` : "";
+    throw new Error(`${code}${error.message || "Insert failed"}`);
+  }
 
   if (msg.sender_role === "dad" && Number(state.trustRules.trustLevel) === 3) {
     const idempotency = crypto.randomUUID();
@@ -920,6 +932,28 @@ async function sendRemote(msg) {
     if (queueErr) {
       console.warn("queue_delayed_auto failed", queueErr.message);
     }
+  }
+}
+
+function shouldRetryAfterMembershipRepair(error) {
+  const code = String(error?.code || "");
+  const msg = String(error?.message || "").toLowerCase();
+  return (
+    code === "42501" ||
+    msg.includes("row-level security") ||
+    msg.includes("permission denied")
+  );
+}
+
+async function ensureConversationMembership(conversationId) {
+  if (!supabase || !conversationId) return;
+  const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
+  const { error } = await supabase.rpc("create_or_join_conversation", {
+    p_conversation_id: conversationId,
+    p_member_role: joinRole,
+  });
+  if (error) {
+    throw new Error(`Membership repair failed: ${error.message}`);
   }
 }
 
@@ -1009,9 +1043,14 @@ function setupServiceWorker() {
 
 function outboxSummary() {
   const sending = state.outbox.filter((x) => x.status === "sending").length;
-  const failed = state.outbox.filter((x) => x.status === "failed").length;
+  const failedItems = state.outbox.filter((x) => x.status === "failed");
+  const failed = failedItems.length;
   const mode = supabase ? "remote" : "local";
-  return `Outbox (${mode}): ${sending} sending, ${failed} failed`;
+  if (!failed) return `Outbox (${mode}): ${sending} sending, ${failed} failed`;
+  const latestErr = String(failedItems[failedItems.length - 1]?.error || "")
+    .replace(/\s+/g, " ")
+    .slice(0, 120);
+  return `Outbox (${mode}): ${sending} sending, ${failed} failed. Last error: ${latestErr}`;
 }
 
 function readJson(key, fallback) {
