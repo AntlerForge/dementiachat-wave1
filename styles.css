@@ -16,6 +16,7 @@ body {
   font-family: "Segoe UI", Arial, sans-serif;
   background: var(--bg);
   color: var(--text);
+  min-height: 100vh;
 }
 
 .topbar {
@@ -63,7 +64,8 @@ body {
 
 .thread {
   min-height: 320px;
-  max-height: 430px;
+  height: calc(100vh - 280px);
+  max-height: none;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -208,6 +210,10 @@ select:focus {
 @media (max-width: 720px) {
   #app {
     padding-bottom: 70px;
+  }
+
+  .thread {
+    height: calc(100vh - 360px);
   }
 
   .tabs {
