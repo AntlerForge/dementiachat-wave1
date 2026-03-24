@@ -63,10 +63,12 @@ create table if not exists dad_ui_profiles (
   theme text not null default 'high-contrast' check (theme in ('high-contrast', 'warm', 'dark')),
   bubble_width integer not null default 80 check (bubble_width between 60 and 95),
   image_default_size text not null default 'medium' check (image_default_size in ('small', 'medium', 'large')),
+  role_lock_enabled boolean not null default false,
   draft_font_scale integer check (draft_font_scale between 16 and 34),
   draft_theme text check (draft_theme in ('high-contrast', 'warm', 'dark')),
   draft_bubble_width integer check (draft_bubble_width between 60 and 95),
   draft_image_default_size text check (draft_image_default_size in ('small', 'medium', 'large')),
+  draft_role_lock_enabled boolean,
   draft_updated_at timestamptz,
   updated_at timestamptz not null default now()
 );
@@ -252,7 +254,8 @@ create or replace function save_dad_ui_draft(
   p_font_scale integer,
   p_theme text,
   p_bubble_width integer,
-  p_image_default_size text
+  p_image_default_size text,
+  p_role_lock_enabled boolean default false
 )
 returns dad_ui_profiles
 language plpgsql
@@ -272,6 +275,7 @@ begin
     draft_theme,
     draft_bubble_width,
     draft_image_default_size,
+    draft_role_lock_enabled,
     draft_updated_at
   )
   values (
@@ -280,6 +284,7 @@ begin
     p_theme,
     p_bubble_width,
     p_image_default_size,
+    p_role_lock_enabled,
     now()
   )
   on conflict (conversation_id) do update
@@ -287,6 +292,7 @@ begin
       draft_theme = excluded.draft_theme,
       draft_bubble_width = excluded.draft_bubble_width,
       draft_image_default_size = excluded.draft_image_default_size,
+      draft_role_lock_enabled = excluded.draft_role_lock_enabled,
       draft_updated_at = now()
   returning * into v_profile;
 
@@ -312,10 +318,12 @@ begin
       theme = coalesce(draft_theme, theme),
       bubble_width = coalesce(draft_bubble_width, bubble_width),
       image_default_size = coalesce(draft_image_default_size, image_default_size),
+      role_lock_enabled = coalesce(draft_role_lock_enabled, role_lock_enabled),
       draft_font_scale = null,
       draft_theme = null,
       draft_bubble_width = null,
       draft_image_default_size = null,
+      draft_role_lock_enabled = null,
       draft_updated_at = null,
       updated_at = now()
   where conversation_id = p_conversation_id
@@ -551,6 +559,8 @@ create or replace function is_conversation_member(_conversation_id uuid)
 returns boolean
 language sql
 stable
+security definer
+set search_path = public
 as $$
   select exists (
     select 1
@@ -564,6 +574,8 @@ create or replace function is_caregiver_admin(_conversation_id uuid)
 returns boolean
 language sql
 stable
+security definer
+set search_path = public
 as $$
   select exists (
     select 1
@@ -689,7 +701,7 @@ drop policy if exists p_conversation_members_select on conversation_members;
 create policy p_conversation_members_select
 on conversation_members
 for select
-using (is_conversation_member(conversation_id));
+using (user_id = auth.uid());
 
 drop policy if exists p_conversation_members_insert_self on conversation_members;
 create policy p_conversation_members_insert_self
