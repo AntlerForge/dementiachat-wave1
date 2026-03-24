@@ -19,6 +19,7 @@ const DAD_UI_DRAFT_KEY = "carechat.dad_ui_draft";
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
 const rolePicker = document.querySelector(".role-picker");
+const appTitle = document.getElementById("appTitle");
 
 const config = window.APP_CONFIG || {};
 const urlParams = new URLSearchParams(window.location.search);
@@ -260,6 +261,7 @@ function onRoleChange(event) {
 
 function render() {
   enforceRoleLock();
+  updateAppTitle();
   appRoot.innerHTML = "";
   if (state.authRequired) {
     renderAuthGate();
@@ -1057,6 +1059,14 @@ function enforceRoleLock() {
     return;
   }
   if (rolePicker) rolePicker.style.display = "";
+}
+
+function updateAppTitle() {
+  if (!appTitle) return;
+  const isDadSurface = state.role === "dad";
+  const text = isDadSurface ? "Tony Chat" : "Care Chat";
+  appTitle.textContent = text;
+  document.title = text;
 }
 
 function isUserEditingControl() {
