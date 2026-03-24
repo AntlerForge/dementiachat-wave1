@@ -153,6 +153,10 @@ select:focus {
   margin-top: 12px;
   border-top: 1px solid var(--line);
   padding-top: 10px;
+  min-height: 140px;
+  height: calc(100vh - 520px);
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .queue-item {
@@ -214,6 +218,10 @@ select:focus {
 
   .thread {
     height: calc(100vh - 360px);
+  }
+
+  .queue {
+    height: calc(100vh - 520px);
   }
 
   .tabs {
