@@ -1018,9 +1018,9 @@ function startMessageRefreshLoop() {
   const ms = Number(config.MESSAGE_POLL_MS || 2500);
   setInterval(async () => {
     if (!supabase || !state.session || state.authRequired || !state.conversationId) return;
-    const beforeSig = messagesSignature(state.messages);
-    await loadMessages();
-    const afterSig = messagesSignature(state.messages);
+    const beforeSig = appStateSignature();
+    await Promise.all([loadMessages(), loadRemoteSettings()]);
+    const afterSig = appStateSignature();
     if (beforeSig !== afterSig && !isUserEditingControl()) {
       render();
     }
@@ -1073,6 +1073,28 @@ function messagesSignature(messages) {
   return `${messages.length}|${last.id}|${last.updated_at || last.created_at || ""}|${
     last.hidden_for_dad ? 1 : 0
   }`;
+}
+
+function dadUiSignature(ui) {
+  if (!ui) return "none";
+  return `${ui.fontScale || 22}|${ui.theme || "high-contrast"}|${ui.bubbleWidth || 80}|${
+    ui.imageSize || "medium"
+  }`;
+}
+
+function trustRulesSignature(rules) {
+  if (!rules) return "none";
+  return `${rules.trustLevel || 1}|${rules.delaySeconds || 180}|${
+    rules.level3ChecklistConfirmed ? 1 : 0
+  }`;
+}
+
+function appStateSignature() {
+  return [
+    messagesSignature(state.messages),
+    dadUiSignature(state.appliedDadUI),
+    trustRulesSignature(state.trustRules),
+  ].join("||");
 }
 
 function readJson(key, fallback) {
