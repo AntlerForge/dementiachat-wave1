@@ -10,7 +10,7 @@
   </head>
   <body>
     <header class="topbar">
-      <h1>Care Chat</h1>
+      <h1 id="appTitle">Care Chat</h1>
       <div class="role-picker">
         <label for="role">Role</label>
         <select id="role">
@@ -24,8 +24,7 @@
 
     <template id="dad-view-template">
       <section class="panel">
-        <h2>Dad View (Simple)</h2>
-        <p class="subtext">One conversation only.</p>
+        <h2>Dad View</h2>
         <div id="dadThread" class="thread"></div>
         <form id="dadComposer" class="composer">
           <input id="dadInput" autocomplete="off" placeholder="Type message..." />
