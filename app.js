@@ -1417,12 +1417,22 @@ async function loadMessages() {
       .eq("conversation_id", state.conversationId)
       .order("created_at", { ascending: false })
       .limit(200);
-    if (!error && data) {
-      state.messages = [...data].reverse();
-      localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(state.messages));
+
+    if (error) {
+      // Never replace live state with disk cache on failure — carechat.local_messages can lag
+      // behind the server (e.g. after delete). That made deleted bubbles reappear and the next
+      // delete hit "Message not found" because the row was already gone.
+      console.warn("Remote load failed; keeping in-memory messages (not stale local cache).", error);
+      if (!Array.isArray(state.messages) || state.messages.length === 0) {
+        state.messages = readJson(LOCAL_MSG_KEY, []);
+      }
       return;
     }
-    console.warn("Remote load failed, using local cache.", error);
+
+    const rows = Array.isArray(data) ? data : [];
+    state.messages = [...rows].reverse();
+    localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(state.messages));
+    return;
   }
   state.messages = readJson(LOCAL_MSG_KEY, []);
 }
@@ -1615,16 +1625,28 @@ async function deleteMessage(messageId) {
     p_message_id: messageId,
     p_reason: "caregiver_delete",
   });
-  if (!error) return;
-
-  const msg = String(error.message || "").toLowerCase();
-  const missingFn = msg.includes("could not find the function") || msg.includes("schema cache");
-  if (missingFn) {
-    throw new Error(
-      "Delete RPC is not deployed yet. Run the new SQL function migration, then retry."
-    );
+  if (error) {
+    const msg = String(error.message || "").toLowerCase();
+    const missingFn = msg.includes("could not find the function") || msg.includes("schema cache");
+    if (missingFn) {
+      throw new Error(
+        "Delete RPC is not deployed yet. Run the new SQL function migration, then retry."
+      );
+    }
+    throw new Error(error.message);
   }
-  throw new Error(error.message);
+
+  const sid = String(messageId);
+  state.messages = state.messages.filter((m) => String(m.id) !== sid);
+  try {
+    const cached = readJson(LOCAL_MSG_KEY, []);
+    localStorage.setItem(
+      LOCAL_MSG_KEY,
+      JSON.stringify(cached.filter((m) => String(m.id) !== sid))
+    );
+  } catch {
+    /* ignore */
+  }
 }
 
 function startOutboxSyncLoop() {
