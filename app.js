@@ -63,12 +63,14 @@ const state = {
   authRequired: false,
   appliedDadUI: readJson(DAD_UI_KEY, {
     fontScale: 22,
+    uiFontScale: 16,
     theme: "high-contrast",
     bubbleWidth: 80,
     imageSize: "medium",
   }),
   caregiverUI: readJson(CAREGIVER_UI_KEY, {
     fontScale: 18,
+    uiFontScale: 16,
     theme: "clear",
     bubbleWidth: 84,
   }),
@@ -85,6 +87,8 @@ const state = {
   },
   dadVisibleMessageCount: 0,
   caregiverVisibleMessageCount: 0,
+  dadStickToBottom: true,
+  caregiverStickToBottom: true,
 };
 
 init().catch((err) => {
@@ -240,6 +244,7 @@ async function loadRemoteSettings() {
   if (uiData) {
     state.appliedDadUI = {
       fontScale: uiData.font_scale,
+      uiFontScale: state.appliedDadUI.uiFontScale || 16,
       theme: uiData.theme,
       bubbleWidth: uiData.bubble_width,
       imageSize: uiData.image_default_size || "medium",
@@ -271,6 +276,7 @@ function onRoleChange(event) {
 }
 
 function render() {
+  rememberThreadScrollIntent();
   dismissMessageContextMenu();
   enforceRoleLock();
   applyRoleTheme();
@@ -284,6 +290,17 @@ function render() {
     renderDadView();
   } else {
     renderCaregiverView();
+  }
+}
+
+function rememberThreadScrollIntent() {
+  const dadThread = document.getElementById("dadThread");
+  if (dadThread) {
+    state.dadStickToBottom = isThreadNearBottom(dadThread);
+  }
+  const caregiverThread = document.getElementById("caregiverThread");
+  if (caregiverThread) {
+    state.caregiverStickToBottom = isThreadNearBottom(caregiverThread);
   }
 }
 
@@ -470,6 +487,7 @@ function renderAuthGate() {
 function renderDadView() {
   const tpl = document.getElementById("dad-view-template");
   const node = tpl.content.cloneNode(true);
+  const panel = node.querySelector(".panel");
   const thread = node.getElementById("dadThread");
   const form = node.getElementById("dadComposer");
   const input = node.getElementById("dadInput");
@@ -479,6 +497,7 @@ function renderDadView() {
     localStorage.setItem(DAD_DRAFT_KEY, state.dadDraft);
   });
 
+  applyUiFontScale(panel, state.appliedDadUI.uiFontScale, 16);
   applyDadUiTokens(thread, state.appliedDadUI);
 
   let visibleCount = 0;
@@ -501,7 +520,7 @@ function renderDadView() {
   });
 
   appRoot.appendChild(node);
-  if (visibleCount > state.dadVisibleMessageCount) {
+  if (state.dadStickToBottom || visibleCount > state.dadVisibleMessageCount) {
     scrollThreadToBottom(thread);
   }
   state.dadVisibleMessageCount = visibleCount;
@@ -510,6 +529,7 @@ function renderDadView() {
 function renderCaregiverView() {
   const tpl = document.getElementById("caregiver-view-template");
   const node = tpl.content.cloneNode(true);
+  const panel = node.querySelector(".panel");
   const thread = node.getElementById("caregiverThread");
   const form = node.getElementById("caregiverComposer");
   const input = node.getElementById("caregiverInput");
@@ -521,6 +541,7 @@ function renderCaregiverView() {
 
   const tabs = node.getElementById("tabs");
   const outboxStatus = node.getElementById("outboxStatus");
+  applyUiFontScale(panel, state.caregiverUI.uiFontScale, 16);
   applyCaregiverUiTokens(thread, state.caregiverUI);
 
   let visibleCount = 0;
@@ -570,7 +591,7 @@ function renderCaregiverView() {
 
   outboxStatus.textContent = outboxSummary();
   appRoot.appendChild(node);
-  if (visibleCount > state.caregiverVisibleMessageCount) {
+  if (state.caregiverStickToBottom || visibleCount > state.caregiverVisibleMessageCount) {
     scrollThreadToBottom(thread);
   }
   state.caregiverVisibleMessageCount = visibleCount;
@@ -806,22 +827,26 @@ function openMessageContextMenu(x, y, msg) {
 
 function wireDadUiPane(root) {
   const fontScale = root.getElementById("fontScale");
+  const uiFontScale = root.getElementById("dadUiFontScale");
   const theme = root.getElementById("theme");
   const bubbleWidth = root.getElementById("bubbleWidth");
   const previewBtn = root.getElementById("previewSettings");
   const applyBtn = root.getElementById("applySettings");
   const note = root.getElementById("previewNote");
   const previewThread = root.getElementById("dadUiPreviewThread");
-  if (!fontScale || !theme || !bubbleWidth || !previewBtn || !applyBtn || !note) return;
+  if (!fontScale || !uiFontScale || !theme || !bubbleWidth || !previewBtn || !applyBtn || !note)
+    return;
 
   const currentDraft = state.previewDadUI || { ...state.appliedDadUI };
   fontScale.value = String(currentDraft.fontScale);
+  uiFontScale.value = String(currentDraft.uiFontScale || 16);
   theme.value = currentDraft.theme;
   bubbleWidth.value = String(currentDraft.bubbleWidth);
 
   const saveDraftFromControls = () => {
     state.previewDadUI = {
       fontScale: Number(fontScale.value),
+      uiFontScale: Number(uiFontScale.value),
       theme: theme.value,
       bubbleWidth: Number(bubbleWidth.value),
       imageSize: state.appliedDadUI.imageSize || "medium",
@@ -835,6 +860,11 @@ function wireDadUiPane(root) {
   };
 
   fontScale.addEventListener("input", () => {
+    saveDraftFromControls();
+    updatePreview();
+    note.textContent = "Draft updated. Click 'Apply to Dad' when ready.";
+  });
+  uiFontScale.addEventListener("input", () => {
     saveDraftFromControls();
     updatePreview();
     note.textContent = "Draft updated. Click 'Apply to Dad' when ready.";
@@ -885,19 +915,22 @@ function wireDadUiPane(root) {
 
 function wireCaregiverUiPane(root) {
   const fontScale = root.getElementById("caregiverFontScale");
+  const uiFontScale = root.getElementById("caregiverUiFontScale");
   const theme = root.getElementById("caregiverTheme");
   const bubbleWidth = root.getElementById("caregiverBubbleWidth");
   const applyBtn = root.getElementById("applyCaregiverUi");
   const status = root.getElementById("caregiverUiStatus");
-  if (!fontScale || !theme || !bubbleWidth || !applyBtn || !status) return;
+  if (!fontScale || !uiFontScale || !theme || !bubbleWidth || !applyBtn || !status) return;
 
   fontScale.value = String(state.caregiverUI.fontScale || 18);
+  uiFontScale.value = String(state.caregiverUI.uiFontScale || 16);
   theme.value = state.caregiverUI.theme || "clear";
   bubbleWidth.value = String(state.caregiverUI.bubbleWidth || 84);
 
   applyBtn.addEventListener("click", () => {
     state.caregiverUI = {
       fontScale: Number(fontScale.value),
+      uiFontScale: Number(uiFontScale.value),
       theme: theme.value,
       bubbleWidth: Number(bubbleWidth.value),
     };
@@ -1033,6 +1066,11 @@ function applyCaregiverUiTokens(threadEl, prefs) {
     threadEl.style.background = "#eff6ff";
     threadEl.style.color = "#0f172a";
   }
+}
+
+function applyUiFontScale(panelEl, fontSize, fallback) {
+  if (!panelEl) return;
+  panelEl.style.fontSize = `${Number(fontSize || fallback || 16)}px`;
 }
 
 async function loadMessages() {
@@ -1361,10 +1399,16 @@ function outboxSummary() {
 
 function messagesSignature(messages) {
   if (!Array.isArray(messages) || !messages.length) return "empty";
-  const last = messages[messages.length - 1];
-  return `${messages.length}|${last.id}|${last.updated_at || last.created_at || ""}|${
-    last.hidden_for_dad ? 1 : 0
-  }`;
+  return messages
+    .map((msg) => {
+      const ts = msg.updated_at || msg.created_at || "";
+      const hidden = msg.hidden_for_dad ? 1 : 0;
+      const content = msg.content || "";
+      const image = msg.image_url || "";
+      const imageSize = msg.image_size || "";
+      return `${msg.id}|${ts}|${hidden}|${content}|${image}|${imageSize}`;
+    })
+    .join("||");
 }
 
 function scrollThreadToBottom(threadEl) {
@@ -1372,6 +1416,13 @@ function scrollThreadToBottom(threadEl) {
   requestAnimationFrame(() => {
     threadEl.scrollTop = threadEl.scrollHeight;
   });
+}
+
+function isThreadNearBottom(threadEl) {
+  if (!threadEl) return true;
+  const threshold = 36;
+  const distance = threadEl.scrollHeight - threadEl.scrollTop - threadEl.clientHeight;
+  return distance <= threshold;
 }
 
 function dadUiSignature(ui) {

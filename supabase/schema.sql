@@ -59,12 +59,12 @@ create index if not exists idx_message_revisions_message
 create table if not exists dad_ui_profiles (
   id uuid primary key default gen_random_uuid(),
   conversation_id uuid not null unique references conversations(id) on delete cascade,
-  font_scale integer not null default 22 check (font_scale between 16 and 34),
+  font_scale integer not null default 22 check (font_scale between 12 and 34),
   theme text not null default 'high-contrast' check (theme in ('high-contrast', 'warm', 'dark')),
   bubble_width integer not null default 80 check (bubble_width between 60 and 95),
   image_default_size text not null default 'medium' check (image_default_size in ('small', 'medium', 'large')),
   role_lock_enabled boolean not null default false,
-  draft_font_scale integer check (draft_font_scale between 16 and 34),
+  draft_font_scale integer check (draft_font_scale between 12 and 34),
   draft_theme text check (draft_theme in ('high-contrast', 'warm', 'dark')),
   draft_bubble_width integer check (draft_bubble_width between 60 and 95),
   draft_image_default_size text check (draft_image_default_size in ('small', 'medium', 'large')),
@@ -72,6 +72,18 @@ create table if not exists dad_ui_profiles (
   draft_updated_at timestamptz,
   updated_at timestamptz not null default now()
 );
+
+-- Migration safety for existing deployments: allow smaller dad font values.
+alter table dad_ui_profiles
+  drop constraint if exists dad_ui_profiles_font_scale_check;
+alter table dad_ui_profiles
+  add constraint dad_ui_profiles_font_scale_check check (font_scale between 12 and 34);
+alter table dad_ui_profiles
+  drop constraint if exists dad_ui_profiles_draft_font_scale_check;
+alter table dad_ui_profiles
+  add constraint dad_ui_profiles_draft_font_scale_check check (
+    draft_font_scale is null or draft_font_scale between 12 and 34
+  );
 
 create table if not exists trust_rules (
   id uuid primary key default gen_random_uuid(),
