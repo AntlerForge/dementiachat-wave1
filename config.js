@@ -5,4 +5,7 @@ window.APP_CONFIG = {
   OUTBOX_SYNC_MS: 5000,
   DEFAULT_DELAY_SECONDS: 180,
   MAX_DELAY_SECONDS: 900,
+  // Web Push (public only — private key lives in Supabase Edge Function secrets).
+  PUSH_VAPID_PUBLIC_KEY:
+    "BL2rO-79h_axWd93FBX2wGeisD0bIF-iKxKEHfnvSMF5C5UczPLJVI8jdaXbqeNxsdRjid5uksdTdGfr-xX7JvI",
 };
