@@ -40,10 +40,17 @@ const CAREGIVER_IMAGE_JPEG_QUALITY = Number(
   config.CAREGIVER_IMAGE_JPEG_QUALITY != null ? config.CAREGIVER_IMAGE_JPEG_QUALITY : 0.82
 );
 
+function parseMsWithDefault(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 const SUPABASE_FETCH_TIMEOUT_MS = Math.min(
-  180_000,
-  Math.max(30_000, Number(config.SUPABASE_FETCH_TIMEOUT_MS || 120_000))
+  300_000,
+  Math.max(45_000, parseMsWithDefault(config.SUPABASE_FETCH_TIMEOUT_MS, 180_000))
 );
+const IMAGE_STORAGE_BUCKET = String(config.IMAGE_STORAGE_BUCKET || "chat-images").trim();
+const USE_STORAGE_FOR_IMAGES = config.USE_STORAGE_FOR_IMAGES !== false;
 
 function fetchWithTimeout(url, options = {}) {
   const { signal: outer, ...rest } = options;
@@ -64,6 +71,13 @@ function fetchWithTimeout(url, options = {}) {
     clearTimeout(id);
     if (outer) outer.removeEventListener("abort", onOuterAbort);
   });
+}
+
+function isAbortLikeError(err) {
+  const name = String(err?.name || "");
+  if (name === "AbortError") return true;
+  const msg = String(err?.message || err || "").toLowerCase();
+  return msg.includes("abort") || msg.includes("timeout") || msg.includes("timed out");
 }
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -139,6 +153,8 @@ const state = {
   lastDadTypingValue: false,
   pushSubscribed: false,
   outboxStorageWarned: false,
+  outboxSyncInFlight: false,
+  refreshInFlight: false,
 };
 
 init().catch((err) => {
@@ -164,11 +180,16 @@ async function init() {
       }
     });
   }
-  await bootstrapRemote();
-  enforceRoleLock();
-  await loadMessages();
-  primeDadMessageMarker();
-  render();
+  try {
+    await bootstrapRemote();
+    enforceRoleLock();
+    await loadMessages();
+    primeDadMessageMarker();
+    render();
+  } catch (err) {
+    showFatalStartupError(err);
+    return;
+  }
   startOutboxSyncLoop();
   startMessageRefreshLoop();
   await setupServiceWorker();
@@ -621,6 +642,11 @@ function renderDadView() {
     visibleCount += 1;
     thread.appendChild(renderBubble(msg, { viewerRole: "dad" }));
   }
+  const dadPending = getPendingOutboxMessagesForRole("dad");
+  for (const pending of dadPending) {
+    visibleCount += 1;
+    thread.appendChild(renderPendingBubble(pending));
+  }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -661,6 +687,7 @@ function renderCaregiverView() {
 
   const tabs = node.getElementById("tabs");
   const outboxStatus = node.getElementById("outboxStatus");
+  const purgeInlineImagesBtn = node.getElementById("purgeInlineImages");
   const dadAlertBanner = node.getElementById("dadAlertBanner");
   const dadAlertText = node.getElementById("dadAlertText");
   const clearDadAlert = node.getElementById("clearDadAlert");
@@ -673,6 +700,11 @@ function renderCaregiverView() {
   for (const msg of state.messages) {
     visibleCount += 1;
     thread.appendChild(renderBubble(msg, { viewerRole: "caregiver" }));
+  }
+  const caregiverPending = getPendingOutboxMessagesForRole("caregiver");
+  for (const pending of caregiverPending) {
+    visibleCount += 1;
+    thread.appendChild(renderPendingBubble(pending));
   }
 
   const panes = node.querySelectorAll(".pane");
@@ -713,6 +745,7 @@ function renderCaregiverView() {
 
   wireImageSize(node);
   wireCaregiverImage(node);
+  wireCaregiverPullRefresh(thread, outboxStatus);
   wireThreadMessageActions(thread);
   wireDadUiPane(node);
   wireCaregiverUiPane(node);
@@ -745,6 +778,22 @@ function renderCaregiverView() {
   if (dadTypingIndicator) {
     dadTypingIndicator.hidden = !state.dadTyping;
   }
+  if (purgeInlineImagesBtn) {
+    purgeInlineImagesBtn.addEventListener("click", async () => {
+      const ok = confirm(
+        "Purge heavy inline image payloads in this conversation? This keeps text but removes embedded photos."
+      );
+      if (!ok) return;
+      try {
+        const removed = await purgeInlineImagesForConversation();
+        outboxStatus.textContent = `Purged ${removed} inline image message${removed === 1 ? "" : "s"}.`;
+        await loadMessages();
+        render();
+      } catch (err) {
+        outboxStatus.textContent = `Purge failed: ${String(err?.message || err)}`;
+      }
+    });
+  }
 
   outboxStatus.textContent = outboxSummary();
   appRoot.appendChild(node);
@@ -752,6 +801,114 @@ function renderCaregiverView() {
     scrollThreadToBottom(thread);
   }
   state.caregiverVisibleMessageCount = visibleCount;
+}
+
+function wireCaregiverPullRefresh(threadEl, statusEl) {
+  if (!threadEl) return;
+  const parent = threadEl.parentElement;
+  if (!parent) return;
+
+  const indicator = document.createElement("div");
+  indicator.className = "pull-refresh-indicator";
+  indicator.textContent = "Pull down to refresh";
+  parent.insertBefore(indicator, threadEl);
+
+  const THRESHOLD = 72;
+  const MAX_PULL = 120;
+  let startY = 0;
+  let pullDistance = 0;
+  let pulling = false;
+  let refreshing = false;
+
+  const setIndicator = (text, active = false) => {
+    indicator.textContent = text;
+    indicator.classList.toggle("active", active);
+  };
+
+  const resetVisuals = () => {
+    pullDistance = 0;
+    threadEl.classList.remove("pulling");
+    threadEl.style.transform = "";
+    indicator.style.height = "0px";
+    indicator.style.opacity = "0";
+    setIndicator("Pull down to refresh", false);
+  };
+
+  const shouldIgnoreStart = (event) => {
+    const target = event.target;
+    if (!target || !(target instanceof Element)) return false;
+    if (target.closest(".message-context-menu")) return true;
+    const tag = target.tagName;
+    return ["INPUT", "TEXTAREA", "BUTTON", "SELECT", "LABEL"].includes(tag);
+  };
+
+  const onStart = (event) => {
+    if (refreshing) return;
+    if (event.touches?.length !== 1) return;
+    if (threadEl.scrollTop > 0) return;
+    if (shouldIgnoreStart(event)) return;
+    startY = event.touches[0].clientY;
+    pulling = true;
+    threadEl.classList.add("pulling");
+    indicator.style.opacity = "1";
+  };
+
+  const onMove = (event) => {
+    if (!pulling || refreshing) return;
+    if (event.touches?.length !== 1) return;
+    const dy = event.touches[0].clientY - startY;
+    if (dy <= 0) {
+      resetVisuals();
+      pulling = false;
+      return;
+    }
+    if (threadEl.scrollTop > 0) {
+      resetVisuals();
+      pulling = false;
+      return;
+    }
+    pullDistance = Math.min(MAX_PULL, dy * 0.55);
+    if (pullDistance > 0) {
+      event.preventDefault();
+    }
+    threadEl.style.transform = `translateY(${pullDistance}px)`;
+    indicator.style.height = `${Math.min(46, pullDistance * 0.62)}px`;
+    indicator.style.opacity = `${Math.min(1, pullDistance / 50)}`;
+    setIndicator(
+      pullDistance >= THRESHOLD ? "Release to refresh" : "Pull down to refresh",
+      pullDistance >= THRESHOLD
+    );
+  };
+
+  const onEnd = async () => {
+    if (!pulling || refreshing) return;
+    pulling = false;
+    const trigger = pullDistance >= THRESHOLD;
+    if (!trigger) {
+      resetVisuals();
+      return;
+    }
+    refreshing = true;
+    indicator.style.height = "34px";
+    indicator.style.opacity = "1";
+    setIndicator("Refreshing...", true);
+    threadEl.style.transform = "translateY(34px)";
+    try {
+      await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
+      if (statusEl) statusEl.textContent = "Refreshed.";
+    } catch (err) {
+      if (statusEl) statusEl.textContent = `Refresh failed: ${String(err?.message || err)}`;
+    } finally {
+      refreshing = false;
+      resetVisuals();
+      render();
+    }
+  };
+
+  threadEl.addEventListener("touchstart", onStart, { passive: true });
+  threadEl.addEventListener("touchmove", onMove, { passive: false });
+  threadEl.addEventListener("touchend", onEnd, { passive: true });
+  threadEl.addEventListener("touchcancel", onEnd, { passive: true });
 }
 
 function wireImageSize(root) {
@@ -1323,6 +1480,52 @@ function renderBubble(msg, options = {}) {
   return bubble;
 }
 
+function getPendingOutboxMessagesForRole(viewerRole) {
+  if (!Array.isArray(state.outbox) || !state.outbox.length) return [];
+  const now = Date.now();
+  return state.outbox
+    .filter((m) => {
+      if (!m || !m.sender_role) return false;
+      if (viewerRole === "dad" && m.sender_role !== "dad") return false;
+      if (viewerRole === "caregiver" && m.sender_role !== "caregiver") return false;
+      return m.status === "sending" || m.status === "failed";
+    })
+    .map((m) => ({
+      ...m,
+      created_at: m.created_at || new Date(now).toISOString(),
+    }))
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+}
+
+function renderPendingBubble(msg) {
+  const bubble = document.createElement("article");
+  bubble.className = `bubble ${msg.sender_role === "caregiver" ? "me" : ""}`;
+  bubble.classList.add("pending");
+  if (msg.image_url) {
+    const img = document.createElement("img");
+    const imageSize = msg.image_size || "medium";
+    img.className = `bubble-image size-${imageSize}`;
+    img.src = msg.image_url;
+    img.alt = "Pending shared photo";
+    bubble.appendChild(img);
+    if (msg.content) {
+      const text = document.createElement("div");
+      text.textContent = msg.content;
+      bubble.appendChild(text);
+    }
+  } else if (msg.content) {
+    bubble.textContent = msg.content;
+  } else {
+    bubble.textContent = "[Pending message]";
+  }
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const label = msg.status === "failed" ? "failed, will retry" : "sending";
+  meta.textContent = `${senderLabel(msg.sender_role)} · ${formatTime(msg.created_at)} · ${label}`;
+  bubble.appendChild(meta);
+  return bubble;
+}
+
 function applyDadUiTokens(threadEl, prefs) {
   threadEl.style.fontSize = `${prefs.fontScale || 22}px`;
   threadEl.style.setProperty("--dad-bubble-width", `${prefs.bubbleWidth || 80}%`);
@@ -1589,13 +1792,21 @@ async function queueImageMessage(imageUrl, senderRole, imageSize) {
   if (supabase && state.session) {
     await ensureConversation();
   }
+  let finalImageUrl = imageUrl;
+  if (supabase && state.session && USE_STORAGE_FOR_IMAGES && state.conversationId) {
+    try {
+      finalImageUrl = await uploadImageForMessage(imageUrl, state.conversationId);
+    } catch (err) {
+      console.warn("Storage upload failed; falling back to inline image payload.", err);
+    }
+  }
   const message = {
     id: crypto.randomUUID(),
     client_msg_id: crypto.randomUUID(),
     conversation_id: state.conversationId,
     sender_role: senderRole,
     content: "",
-    image_url: imageUrl,
+    image_url: finalImageUrl,
     image_size: imageSize || "medium",
     hidden_for_dad: false,
     created_at: new Date().toISOString(),
@@ -1654,6 +1865,19 @@ async function sendRemote(msg) {
   const insertOnce = async () =>
     supabase.from("messages").insert(payload).select("*").maybeSingle();
   let { data: insertedRow, error } = await insertOnce();
+  if (error && isAbortLikeError(error)) {
+    const existingAfterAbort = await loadExistingMessageByClientMsgId(
+      msg.conversation_id,
+      msg.client_msg_id
+    );
+    if (existingAfterAbort) {
+      mergeServerMessageIntoState(existingAfterAbort);
+      return;
+    }
+    const retryAbort = await insertOnce();
+    error = retryAbort.error;
+    insertedRow = retryAbort.data;
+  }
   if (error && shouldRetryAfterMembershipRepair(error)) {
     await ensureConversationMembership(msg.conversation_id);
     const retry = await insertOnce();
@@ -1753,6 +1977,12 @@ async function editMessage(messageId, nextText) {
     p_reason: "caregiver_edit",
   });
   if (error) throw new Error(error.message);
+  state.messages = state.messages.map((m) =>
+    String(m.id) === String(messageId)
+      ? { ...m, content: nextText, hidden_for_dad: false, updated_at: new Date().toISOString() }
+      : m
+  );
+  persistMessagesCache(state.messages);
 }
 
 async function hideMessageForDad(messageId, hide) {
@@ -1774,6 +2004,12 @@ async function hideMessageForDad(messageId, hide) {
     p_reason: hide ? "caregiver_hide" : "caregiver_unhide",
   });
   if (error) throw new Error(error.message);
+  state.messages = state.messages.map((m) =>
+    String(m.id) === String(messageId)
+      ? { ...m, hidden_for_dad: Boolean(hide), updated_at: new Date().toISOString() }
+      : m
+  );
+  persistMessagesCache(state.messages);
 }
 
 async function deleteMessage(messageId) {
@@ -1807,14 +2043,22 @@ async function deleteMessage(messageId) {
 function startOutboxSyncLoop() {
   const ms = Number(config.OUTBOX_SYNC_MS || 5000);
   setInterval(async () => {
-    const changed = await syncOutboxOnce();
-    if (
-      changed &&
-      !state.authRequired &&
-      state.role === "caregiver" &&
-      !isUserEditingControl()
-    ) {
-      render();
+    if (state.outboxSyncInFlight) return;
+    state.outboxSyncInFlight = true;
+    try {
+      const changed = await syncOutboxOnce();
+      if (
+        changed &&
+        !state.authRequired &&
+        state.role === "caregiver" &&
+        !isUserEditingControl()
+      ) {
+        render();
+      }
+    } catch (err) {
+      console.warn("Outbox sync loop failed", err);
+    } finally {
+      state.outboxSyncInFlight = false;
     }
   }, ms);
 }
@@ -1823,15 +2067,23 @@ function startMessageRefreshLoop() {
   const ms = Number(config.MESSAGE_POLL_MS || 2500);
   setInterval(async () => {
     if (!supabase || !state.session || state.authRequired || !state.conversationId) return;
-    const beforeSig = appStateSignature();
-    const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
-    await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
-    handleDadInboundAlerts(beforeMessages, state.messages);
-    const afterSig = appStateSignature();
-    const messagesChanged =
-      messagesSignature(beforeMessages) !== messagesSignature(state.messages);
-    if (beforeSig !== afterSig && (!isUserEditingControl() || messagesChanged)) {
-      render();
+    if (state.refreshInFlight) return;
+    state.refreshInFlight = true;
+    try {
+      const beforeSig = appStateSignature();
+      const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
+      await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
+      handleDadInboundAlerts(beforeMessages, state.messages);
+      const afterSig = appStateSignature();
+      const messagesChanged =
+        messagesSignature(beforeMessages) !== messagesSignature(state.messages);
+      if (beforeSig !== afterSig && (!isUserEditingControl() || messagesChanged)) {
+        render();
+      }
+    } catch (err) {
+      console.warn("Message refresh loop failed", err);
+    } finally {
+      state.refreshInFlight = false;
     }
   }, ms);
 }
@@ -2093,6 +2345,53 @@ function senderLabel(senderRole) {
   if (senderRole === "caregiver") return "Tony";
   if (senderRole === "dad") return "Dad";
   return "System";
+}
+
+function dataUrlToBlob(dataUrl) {
+  const m = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/);
+  if (!m) throw new Error("Unsupported data URL.");
+  const mime = m[1] || "application/octet-stream";
+  const isBase64 = Boolean(m[2]);
+  const payload = m[3] || "";
+  if (isBase64) {
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+  return new Blob([decodeURIComponent(payload)], { type: mime });
+}
+
+async function uploadImageForMessage(dataUrl, conversationId) {
+  if (!supabase) return dataUrl;
+  const blob = dataUrlToBlob(dataUrl);
+  const ext = "jpg";
+  const fileName = `${Date.now()}-${crypto.randomUUID()}.${ext}`;
+  const path = `${conversationId}/${fileName}`;
+  const { error: upErr } = await supabase.storage
+    .from(IMAGE_STORAGE_BUCKET)
+    .upload(path, blob, {
+      contentType: "image/jpeg",
+      cacheControl: "3600",
+      upsert: false,
+    });
+  if (upErr) throw upErr;
+  const { data } = supabase.storage.from(IMAGE_STORAGE_BUCKET).getPublicUrl(path);
+  const publicUrl = data?.publicUrl || "";
+  if (!publicUrl) throw new Error("Could not resolve uploaded image URL.");
+  return publicUrl;
+}
+
+async function purgeInlineImagesForConversation() {
+  if (!supabase || !state.conversationId) {
+    throw new Error("Cloud mode and a conversation are required.");
+  }
+  const { data, error } = await supabase.rpc("caregiver_purge_inline_images", {
+    p_conversation_id: state.conversationId,
+    p_placeholder_text: "[Image removed to stabilize chat]",
+  });
+  if (error) throw new Error(error.message);
+  return Number(data || 0);
 }
 
 function readFileAsDataUrl(file) {

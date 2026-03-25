@@ -71,6 +71,29 @@ body {
   border-radius: 8px;
   padding: 10px;
   background: #f9fafb;
+  transition: transform 140ms ease;
+}
+
+.thread.pulling {
+  transition: none;
+}
+
+.pull-refresh-indicator {
+  height: 0;
+  opacity: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+  color: #334155;
+  font-size: 0.85rem;
+  transition: height 140ms ease, opacity 140ms ease;
+}
+
+.pull-refresh-indicator.active {
+  color: #1d4ed8;
+  font-weight: 600;
 }
 
 .bubble {
@@ -86,6 +109,11 @@ body {
 .bubble.me {
   margin-left: auto;
   background: #eef2ff;
+}
+
+.bubble.pending {
+  border-style: dashed;
+  opacity: 0.82;
 }
 
 .meta {
@@ -258,6 +286,10 @@ select:focus {
 
 .image-actions {
   grid-template-columns: 1fr 1fr;
+}
+
+.image-maintenance button {
+  max-width: 280px;
 }
 
 .row input[type="file"] {

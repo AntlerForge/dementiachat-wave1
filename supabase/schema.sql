@@ -358,6 +358,47 @@ begin
 end;
 $$;
 
+create or replace function caregiver_purge_inline_images(
+  p_conversation_id uuid,
+  p_placeholder_text text default '[Image removed to stabilize chat]'
+)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_count integer := 0;
+begin
+  if not is_caregiver_admin(p_conversation_id) then
+    raise exception 'Not authorized';
+  end if;
+
+  update messages
+  set
+    image_url = null,
+    content = case
+      when coalesce(content, '') = '' then left(coalesce(p_placeholder_text, '[Image removed]'), 500)
+      else content
+    end,
+    updated_at = now()
+  where conversation_id = p_conversation_id
+    and image_url like 'data:%';
+
+  get diagnostics v_count = row_count;
+
+  insert into activity_events (conversation_id, actor_id, event_type, payload)
+  values (
+    p_conversation_id,
+    auth.uid(),
+    'inline_images_purged',
+    jsonb_build_object('count', v_count)
+  );
+
+  return v_count;
+end;
+$$;
+
 create or replace function save_dad_ui_draft(
   p_conversation_id uuid,
   p_font_scale integer,
@@ -985,3 +1026,36 @@ create policy p_push_subscriptions_delete_self
 on push_subscriptions
 for delete
 using (user_id = auth.uid());
+
+-- Optional reliability upgrade: store chat images in Supabase Storage instead of inline data URLs.
+insert into storage.buckets (id, name, public)
+values ('chat-images', 'chat-images', true)
+on conflict (id) do nothing;
+
+drop policy if exists p_chat_images_public_read on storage.objects;
+create policy p_chat_images_public_read
+on storage.objects
+for select
+using (bucket_id = 'chat-images');
+
+drop policy if exists p_chat_images_auth_insert on storage.objects;
+create policy p_chat_images_auth_insert
+on storage.objects
+for insert
+to authenticated
+with check (bucket_id = 'chat-images');
+
+drop policy if exists p_chat_images_owner_update on storage.objects;
+create policy p_chat_images_owner_update
+on storage.objects
+for update
+to authenticated
+using (bucket_id = 'chat-images' and owner = auth.uid())
+with check (bucket_id = 'chat-images' and owner = auth.uid());
+
+drop policy if exists p_chat_images_owner_delete on storage.objects;
+create policy p_chat_images_owner_delete
+on storage.objects
+for delete
+to authenticated
+using (bucket_id = 'chat-images' and owner = auth.uid());

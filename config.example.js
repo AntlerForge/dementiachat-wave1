@@ -20,6 +20,9 @@ window.APP_CONFIG = {
   // MAX_CAREGIVER_IMAGE_PICK_MB: 25,
   // CAREGIVER_IMAGE_MAX_EDGE_PX: 1920,
   // CAREGIVER_IMAGE_JPEG_QUALITY: 0.82,
+  // Prefer Supabase Storage URLs (recommended for reliability with multi-device sync).
+  // USE_STORAGE_FOR_IMAGES: true,
+  // IMAGE_STORAGE_BUCKET: "chat-images",
   // Supabase REST fetch timeout (ms); helps slow networks / large responses (default 120000).
   // SUPABASE_FETCH_TIMEOUT_MS: 120000,
 };
