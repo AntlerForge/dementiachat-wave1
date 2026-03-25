@@ -35,10 +35,36 @@ const config = window.APP_CONFIG || {};
 // Caregiver photo pick: allow large library files; encode down before send (messages store a data URL).
 const MAX_CAREGIVER_IMAGE_PICK_BYTES =
   Math.min(50, Math.max(3, Number(config.MAX_CAREGIVER_IMAGE_PICK_MB || 25))) * 1024 * 1024;
-const CAREGIVER_IMAGE_MAX_EDGE_PX = Number(config.CAREGIVER_IMAGE_MAX_EDGE_PX || 2560);
+const CAREGIVER_IMAGE_MAX_EDGE_PX = Number(config.CAREGIVER_IMAGE_MAX_EDGE_PX || 1920);
 const CAREGIVER_IMAGE_JPEG_QUALITY = Number(
-  config.CAREGIVER_IMAGE_JPEG_QUALITY != null ? config.CAREGIVER_IMAGE_JPEG_QUALITY : 0.87
+  config.CAREGIVER_IMAGE_JPEG_QUALITY != null ? config.CAREGIVER_IMAGE_JPEG_QUALITY : 0.82
 );
+
+const SUPABASE_FETCH_TIMEOUT_MS = Math.min(
+  180_000,
+  Math.max(30_000, Number(config.SUPABASE_FETCH_TIMEOUT_MS || 120_000))
+);
+
+function fetchWithTimeout(url, options = {}) {
+  const { signal: outer, ...rest } = options;
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), SUPABASE_FETCH_TIMEOUT_MS);
+  const onOuterAbort = () => {
+    clearTimeout(id);
+    ctrl.abort();
+  };
+  if (outer) {
+    if (outer.aborted) {
+      clearTimeout(id);
+      return Promise.reject(outer.reason ?? new DOMException("Aborted", "AbortError"));
+    }
+    outer.addEventListener("abort", onOuterAbort, { once: true });
+  }
+  return fetch(url, { ...rest, signal: ctrl.signal }).finally(() => {
+    clearTimeout(id);
+    if (outer) outer.removeEventListener("abort", onOuterAbort);
+  });
+}
 
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.get("cloud") === "1") {
@@ -51,6 +77,7 @@ const forceLocalMode = localStorage.getItem(LOCAL_MODE_KEY) === "1";
 const hasSupabaseConfig = !forceLocalMode && Boolean(config.SUPABASE_URL && config.SUPABASE_ANON_KEY);
 const supabase = hasSupabaseConfig
   ? createClient(config.SUPABASE_URL, config.SUPABASE_ANON_KEY, {
+      global: { fetch: fetchWithTimeout },
       auth: {
         persistSession: true,
         autoRefreshToken: true,
@@ -1255,7 +1282,9 @@ function renderBubble(msg, options = {}) {
     bubble.classList.add("is-actionable");
   }
   bubble.dataset.messageId = msg.id;
-  if (msg.image_url) {
+  if (msg._cache_image_omitted && !msg.image_url) {
+    bubble.textContent = "[Photo — wait for sync or reload the page]";
+  } else if (msg.image_url) {
     const img = document.createElement("img");
     const imageSize = msg.image_size || "medium";
     img.className = `bubble-image size-${imageSize}`;
@@ -1498,7 +1527,7 @@ async function loadMessages() {
 
     const rows = Array.isArray(data) ? data : [];
     state.messages = [...rows].reverse();
-    localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(state.messages));
+    persistMessagesCache(state.messages);
     return;
   }
   state.messages = readJson(LOCAL_MSG_KEY, []);
@@ -1518,7 +1547,7 @@ function mergeServerMessageIntoState(row) {
   state.messages = next.sort((a, b) =>
     String(a.created_at || "").localeCompare(String(b.created_at || ""))
   );
-  localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(state.messages));
+  persistMessagesCache(state.messages);
 }
 
 async function queueMessage(content, senderRole) {
@@ -1593,7 +1622,7 @@ async function sendRemote(msg) {
   if (!supabase) {
     const local = readJson(LOCAL_MSG_KEY, []);
     local.push(msg);
-    localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(local));
+    persistMessagesCache(local);
     return;
   }
   if (!msg.conversation_id) {
@@ -1650,6 +1679,26 @@ function shouldRetryAfterMembershipRepair(error) {
   );
 }
 
+/** Insert often succeeds on the server then the client times out — retries hit messages_client_msg_id_key. */
+function isClientMsgIdUniqueViolation(error) {
+  const code = String(error?.code || "");
+  if (code === "23505") return true;
+  const msg = String(error?.message || "").toLowerCase();
+  return msg.includes("client_msg_id") || msg.includes("messages_client_msg_id");
+}
+
+async function loadExistingMessageByClientMsgId(conversationId, clientMsgId) {
+  if (!supabase || !conversationId || !clientMsgId) return null;
+  const { data, error } = await supabase
+    .from("messages")
+    .select("*")
+    .eq("conversation_id", conversationId)
+    .eq("client_msg_id", clientMsgId)
+    .maybeSingle();
+  if (error) return null;
+  return data;
+}
+
 async function ensureConversationMembership(conversationId) {
   if (!supabase || !conversationId) return;
   const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
@@ -1688,7 +1737,7 @@ async function hideMessageForDad(messageId, hide) {
     const idx = local.findIndex((m) => m.id === messageId);
     if (idx >= 0) {
       local[idx].hidden_for_dad = hide;
-      localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(local));
+      persistMessagesCache(local);
     }
     return;
   }
@@ -1728,15 +1777,7 @@ async function deleteMessage(messageId) {
 
   const sid = String(messageId);
   state.messages = state.messages.filter((m) => String(m.id) !== sid);
-  try {
-    const cached = readJson(LOCAL_MSG_KEY, []);
-    localStorage.setItem(
-      LOCAL_MSG_KEY,
-      JSON.stringify(cached.filter((m) => String(m.id) !== sid))
-    );
-  } catch {
-    /* ignore */
-  }
+  persistMessagesCache(state.messages);
 }
 
 function startOutboxSyncLoop() {
@@ -1912,6 +1953,48 @@ function readJson(key, fallback) {
     return raw ? JSON.parse(raw) : fallback;
   } catch {
     return fallback;
+  }
+}
+
+const LOCAL_MSG_IMAGE_CACHE_MAX_CHARS = 24_000;
+
+/** Avoid QuotaExceededError: huge data URLs in the thread exceed typical 5MB localStorage limits. */
+function persistMessagesCache(messages) {
+  if (!Array.isArray(messages)) return;
+  const lite = messages.map((m) => {
+    const u = m.image_url;
+    if (typeof u === "string" && u.length > LOCAL_MSG_IMAGE_CACHE_MAX_CHARS) {
+      return { ...m, image_url: null, _cache_image_omitted: true };
+    }
+    return m;
+  });
+  try {
+    localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(lite));
+  } catch (e) {
+    const q =
+      e?.name === "QuotaExceededError" || e?.code === 22 || String(e?.message || "").includes("quota");
+    if (!q) {
+      console.warn("Could not persist message cache.", e);
+      return;
+    }
+    try {
+      localStorage.removeItem(LOCAL_MSG_KEY);
+      const minimal = lite.map((m) => ({
+        id: m.id,
+        client_msg_id: m.client_msg_id,
+        conversation_id: m.conversation_id,
+        sender_role: m.sender_role,
+        content: m.content,
+        image_size: m.image_size,
+        hidden_for_dad: m.hidden_for_dad,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        _cache_image_omitted: Boolean(m._cache_image_omitted || m.image_url),
+      }));
+      localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(minimal));
+    } catch (e2) {
+      console.warn("Message cache still too large for localStorage; skipping disk cache.", e2);
+    }
   }
 }
 

@@ -18,6 +18,8 @@ window.APP_CONFIG = {
 
   // Caregiver image upload (optional). Picked files can be large; they are resized to JPEG before send.
   // MAX_CAREGIVER_IMAGE_PICK_MB: 25,
-  // CAREGIVER_IMAGE_MAX_EDGE_PX: 2560,
-  // CAREGIVER_IMAGE_JPEG_QUALITY: 0.87,
+  // CAREGIVER_IMAGE_MAX_EDGE_PX: 1920,
+  // CAREGIVER_IMAGE_JPEG_QUALITY: 0.82,
+  // Supabase REST fetch timeout (ms); helps slow networks / large responses (default 120000).
+  // SUPABASE_FETCH_TIMEOUT_MS: 120000,
 };
