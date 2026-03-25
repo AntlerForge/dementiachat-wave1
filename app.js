@@ -31,6 +31,15 @@ let activeMenuEscapeHandler = null;
 let swRegistration = null;
 
 const config = window.APP_CONFIG || {};
+
+// Caregiver photo pick: allow large library files; encode down before send (messages store a data URL).
+const MAX_CAREGIVER_IMAGE_PICK_BYTES =
+  Math.min(50, Math.max(3, Number(config.MAX_CAREGIVER_IMAGE_PICK_MB || 25))) * 1024 * 1024;
+const CAREGIVER_IMAGE_MAX_EDGE_PX = Number(config.CAREGIVER_IMAGE_MAX_EDGE_PX || 2560);
+const CAREGIVER_IMAGE_JPEG_QUALITY = Number(
+  config.CAREGIVER_IMAGE_JPEG_QUALITY != null ? config.CAREGIVER_IMAGE_JPEG_QUALITY : 0.87
+);
+
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.get("cloud") === "1") {
   localStorage.removeItem(LOCAL_MODE_KEY);
@@ -738,13 +747,16 @@ function wireCaregiverImage(root) {
       status.textContent = "Please choose an image file.";
       return;
     }
-    if (file.size > 3 * 1024 * 1024) {
-      status.textContent = "Image too large. Please use a file under 3MB.";
+    const maxMb = Math.round(MAX_CAREGIVER_IMAGE_PICK_BYTES / (1024 * 1024));
+    if (file.size > MAX_CAREGIVER_IMAGE_PICK_BYTES) {
+      status.textContent = `Image too large. Use a file under ${maxMb}MB (photos are resized before sending).`;
       return;
     }
     try {
-      const dataUrl = await readFileAsDataUrl(file);
+      status.textContent = "Processing photo…";
+      const dataUrl = await encodeImageFileForUpload(file);
       state.caregiverImageDraft = { dataUrl, name: file.name };
+      status.textContent = "";
       renderPreview();
     } catch (err) {
       status.textContent = `Could not read image: ${String(err.message || err)}`;
@@ -1929,4 +1941,30 @@ function readFileAsDataUrl(file) {
     reader.onerror = () => reject(reader.error || new Error("File read failed"));
     reader.readAsDataURL(file);
   });
+}
+
+/** Downscale to JPEG for upload so large iPhone photos don’t blow the DB payload. */
+async function encodeImageFileForUpload(file) {
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(file);
+    try {
+      const w = bitmap.width;
+      const h = bitmap.height;
+      if (!w || !h) throw new Error("Invalid image dimensions");
+      const maxEdge = CAREGIVER_IMAGE_MAX_EDGE_PX;
+      const scale = Math.min(1, maxEdge / Math.max(w, h));
+      const tw = Math.max(1, Math.round(w * scale));
+      const th = Math.max(1, Math.round(h * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = tw;
+      canvas.height = th;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas not available");
+      ctx.drawImage(bitmap, 0, 0, tw, th);
+      return canvas.toDataURL("image/jpeg", CAREGIVER_IMAGE_JPEG_QUALITY);
+    } finally {
+      if (typeof bitmap.close === "function") bitmap.close();
+    }
+  }
+  return readFileAsDataUrl(file);
 }

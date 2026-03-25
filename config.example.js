@@ -15,4 +15,9 @@ window.APP_CONFIG = {
   // Delayed auto defaults (Wave 1 Level 3 guardrails).
   DEFAULT_DELAY_SECONDS: 180,
   MAX_DELAY_SECONDS: 900,
+
+  // Caregiver image upload (optional). Picked files can be large; they are resized to JPEG before send.
+  // MAX_CAREGIVER_IMAGE_PICK_MB: 25,
+  // CAREGIVER_IMAGE_MAX_EDGE_PX: 2560,
+  // CAREGIVER_IMAGE_JPEG_QUALITY: 0.87,
 };
