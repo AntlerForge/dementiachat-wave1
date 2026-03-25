@@ -138,11 +138,12 @@ const state = {
   lastDadTypingEmitAt: 0,
   lastDadTypingValue: false,
   pushSubscribed: false,
+  outboxStorageWarned: false,
 };
 
 init().catch((err) => {
   console.error(err);
-  alert("Initialization failed. Check console for details.");
+  showFatalStartupError(err);
 });
 
 async function init() {
@@ -152,10 +153,15 @@ async function init() {
     await processAuthCallbackIfPresent();
     await hydrateAuth();
     supabase.auth.onAuthStateChange(async (evt, session) => {
-      state.authDebug.lastEvent = evt;
-      state.session = session;
-      await bootstrapRemote();
-      render();
+      try {
+        state.authDebug.lastEvent = evt;
+        state.session = session;
+        await bootstrapRemote();
+        render();
+      } catch (err) {
+        console.error("Auth state update failed", err);
+        showFatalStartupError(err);
+      }
     });
   }
   await bootstrapRemote();
@@ -620,13 +626,17 @@ function renderDadView() {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-    input.value = "";
-    state.dadDraft = "";
-    localStorage.setItem(DAD_DRAFT_KEY, "");
-    await queueMessage(text, "dad");
-    emitDadTypingStatus(false, true);
-    await loadMessages();
-    render();
+    try {
+      await queueMessage(text, "dad");
+      input.value = "";
+      state.dadDraft = "";
+      localStorage.setItem(DAD_DRAFT_KEY, "");
+      emitDadTypingStatus(false, true);
+      await loadMessages();
+      render();
+    } catch (err) {
+      alert(`Send failed: ${String(err?.message || err)}`);
+    }
   });
 
   appRoot.appendChild(node);
@@ -689,12 +699,16 @@ function renderCaregiverView() {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
-    input.value = "";
-    state.caregiverDraft = "";
-    localStorage.setItem(CAREGIVER_DRAFT_KEY, "");
-    await queueMessage(text, "caregiver");
-    await loadMessages();
-    render();
+    try {
+      await queueMessage(text, "caregiver");
+      input.value = "";
+      state.caregiverDraft = "";
+      localStorage.setItem(CAREGIVER_DRAFT_KEY, "");
+      await loadMessages();
+      render();
+    } catch (err) {
+      outboxStatus.textContent = `Send failed: ${String(err?.message || err)}`;
+    }
   });
 
   wireImageSize(node);
@@ -1567,7 +1581,7 @@ async function queueMessage(content, senderRole) {
     status: "sending",
   };
   state.outbox.push(message);
-  localStorage.setItem(OUTBOX_KEY, JSON.stringify(state.outbox));
+  persistOutbox();
   await syncOutboxOnce();
 }
 
@@ -1588,7 +1602,7 @@ async function queueImageMessage(imageUrl, senderRole, imageSize) {
     status: "sending",
   };
   state.outbox.push(message);
-  localStorage.setItem(OUTBOX_KEY, JSON.stringify(state.outbox));
+  persistOutbox();
   await syncOutboxOnce();
 }
 
@@ -1614,7 +1628,7 @@ async function syncOutboxOnce() {
   const beforeLength = state.outbox.length;
   state.outbox = state.outbox.filter((x) => x.status !== "sent");
   if (state.outbox.length !== beforeLength) changed = true;
-  localStorage.setItem(OUTBOX_KEY, JSON.stringify(state.outbox));
+  persistOutbox();
   return changed;
 }
 
@@ -1645,6 +1659,16 @@ async function sendRemote(msg) {
     const retry = await insertOnce();
     error = retry.error;
     insertedRow = retry.data;
+  }
+  if (error && isClientMsgIdUniqueViolation(error)) {
+    const existing = await loadExistingMessageByClientMsgId(
+      msg.conversation_id,
+      msg.client_msg_id
+    );
+    if (existing) {
+      mergeServerMessageIntoState(existing);
+      return;
+    }
   }
   if (error) {
     const code = error.code ? `[${error.code}] ` : "";
@@ -1718,7 +1742,7 @@ async function editMessage(messageId, nextText) {
     const idx = local.findIndex((m) => m.id === messageId);
     if (idx >= 0) {
       local[idx].content = nextText;
-      localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(local));
+      persistMessagesCache(local);
     }
     return;
   }
@@ -1757,7 +1781,7 @@ async function deleteMessage(messageId) {
   if (!supabase) {
     const local = readJson(LOCAL_MSG_KEY, []);
     const next = local.filter((m) => m.id !== messageId);
-    localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(next));
+    persistMessagesCache(next);
     return;
   }
   const { error } = await supabase.rpc("caregiver_delete_message", {
@@ -1995,6 +2019,60 @@ function persistMessagesCache(messages) {
     } catch (e2) {
       console.warn("Message cache still too large for localStorage; skipping disk cache.", e2);
     }
+  }
+}
+
+function persistOutbox() {
+  try {
+    localStorage.setItem(OUTBOX_KEY, JSON.stringify(state.outbox));
+  } catch (e) {
+    console.warn("Outbox persistence failed; keeping in-memory outbox only.", e);
+    try {
+      localStorage.removeItem(OUTBOX_KEY);
+    } catch {
+      // noop
+    }
+    if (!state.outboxStorageWarned) {
+      state.outboxStorageWarned = true;
+      alert(
+        "Storage is full on this device. Messages may still send now, but queued retries may be lost if the app closes."
+      );
+    }
+  }
+}
+
+function showFatalStartupError(err) {
+  const message = String(err?.message || err || "Unknown startup error");
+  if (!appRoot) {
+    alert(`Startup failed: ${message}`);
+    return;
+  }
+  appRoot.innerHTML = `
+    <section class="panel">
+      <h2>App failed to start</h2>
+      <p class="subtext">${message.replace(/[<>&]/g, "")}</p>
+      <div class="row auth-actions">
+        <button id="startupReload" type="button">Reload app</button>
+        <button id="startupCloud" type="button">Retry cloud mode</button>
+        <button id="startupLocal" type="button">Open local mode</button>
+      </div>
+    </section>
+  `;
+  const reload = document.getElementById("startupReload");
+  const cloud = document.getElementById("startupCloud");
+  const local = document.getElementById("startupLocal");
+  if (reload) reload.addEventListener("click", () => window.location.reload());
+  if (cloud) {
+    cloud.addEventListener("click", () => {
+      const base = `${window.location.origin}${window.location.pathname}`;
+      window.location.href = `${base}?cloud=1`;
+    });
+  }
+  if (local) {
+    local.addEventListener("click", () => {
+      const base = `${window.location.origin}${window.location.pathname}`;
+      window.location.href = `${base}?local=1`;
+    });
   }
 }
 
