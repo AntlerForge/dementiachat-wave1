@@ -38,7 +38,7 @@
         <h2>Caregiver View</h2>
         <nav class="tabs" id="tabs">
           <button data-tab="chat" class="active">Chat</button>
-          <button data-tab="dad-ui">Dad UI</button>
+          <button data-tab="dad-ui">UI Controls</button>
           <button data-tab="ai-rules">AI Rules</button>
         </nav>
 
@@ -66,11 +66,11 @@
               <option value="large">Large</option>
             </select>
           </div>
-          <div id="editQueue" class="queue"></div>
           <div id="outboxStatus" class="status"></div>
         </section>
 
         <section data-pane="dad-ui" class="pane">
+          <h3>Dad controls</h3>
           <div class="row">
             <label for="fontScale">Font size</label>
             <input id="fontScale" type="range" min="16" max="34" value="22" />
@@ -87,12 +87,6 @@
             <label for="bubbleWidth">Bubble width</label>
             <input id="bubbleWidth" type="range" min="60" max="95" value="80" />
           </div>
-          <div class="row">
-            <label>
-              <input id="lockDadRole" type="checkbox" />
-              Lock Dad device to Dad View (hide role switch)
-            </label>
-          </div>
           <button id="previewSettings">Preview in this panel</button>
           <button id="applySettings">Apply to Dad</button>
           <div class="row dad-ui-preview">
@@ -103,6 +97,26 @@
             </div>
           </div>
           <p id="previewNote" class="status"></p>
+
+          <h3>Caregiver controls</h3>
+          <div class="row">
+            <label for="caregiverFontScale">Font size</label>
+            <input id="caregiverFontScale" type="range" min="14" max="28" value="18" />
+          </div>
+          <div class="row">
+            <label for="caregiverTheme">Theme</label>
+            <select id="caregiverTheme">
+              <option value="clear">Clear blue</option>
+              <option value="warm">Warm soft</option>
+              <option value="dark">Dark high contrast</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="caregiverBubbleWidth">Bubble width</label>
+            <input id="caregiverBubbleWidth" type="range" min="60" max="95" value="84" />
+          </div>
+          <button id="applyCaregiverUi" type="button">Apply to caregiver view</button>
+          <p id="caregiverUiStatus" class="status"></p>
         </section>
 
         <section data-pane="ai-rules" class="pane">

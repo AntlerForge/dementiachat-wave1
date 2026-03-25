@@ -249,6 +249,51 @@ begin
 end;
 $$;
 
+create or replace function caregiver_delete_message(
+  p_message_id uuid,
+  p_reason text default ''
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_msg messages;
+begin
+  select * into v_msg
+  from messages m
+  where m.id = p_message_id
+  for update;
+
+  if not found then
+    raise exception 'Message not found';
+  end if;
+
+  if not is_caregiver_admin(v_msg.conversation_id) then
+    raise exception 'Not authorized';
+  end if;
+
+  insert into activity_events (conversation_id, actor_id, event_type, payload)
+  values (
+    v_msg.conversation_id,
+    auth.uid(),
+    'message_deleted',
+    jsonb_build_object(
+      'message_id', v_msg.id,
+      'sender_role', v_msg.sender_role,
+      'reason', coalesce(p_reason, ''),
+      'had_image', (v_msg.image_url is not null)
+    )
+  );
+
+  delete from messages
+  where id = v_msg.id;
+
+  return v_msg.id;
+end;
+$$;
+
 create or replace function save_dad_ui_draft(
   p_conversation_id uuid,
   p_font_scale integer,

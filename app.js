@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const ROLE_KEY = "carechat.role";
 const DAD_UI_KEY = "carechat.dad_ui";
+const CAREGIVER_UI_KEY = "carechat.caregiver_ui";
 const TRUST_KEY = "carechat.trust_rules";
 const OUTBOX_KEY = "carechat.local_outbox";
 const LOCAL_MSG_KEY = "carechat.local_messages";
@@ -20,6 +21,9 @@ const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
 const rolePicker = document.querySelector(".role-picker");
 const appTitle = document.getElementById("appTitle");
+let activeMessageMenu = null;
+let activeMenuOutsideHandler = null;
+let activeMenuEscapeHandler = null;
 
 const config = window.APP_CONFIG || {};
 const urlParams = new URLSearchParams(window.location.search);
@@ -62,6 +66,11 @@ const state = {
     theme: "high-contrast",
     bubbleWidth: 80,
     imageSize: "medium",
+  }),
+  caregiverUI: readJson(CAREGIVER_UI_KEY, {
+    fontScale: 18,
+    theme: "clear",
+    bubbleWidth: 84,
   }),
   previewDadUI: readJson(DAD_UI_DRAFT_KEY, null),
   roleLockEnabled: false,
@@ -262,7 +271,9 @@ function onRoleChange(event) {
 }
 
 function render() {
+  dismissMessageContextMenu();
   enforceRoleLock();
+  applyRoleTheme();
   updateAppTitle();
   appRoot.innerHTML = "";
   if (state.authRequired) {
@@ -274,6 +285,13 @@ function render() {
   } else {
     renderCaregiverView();
   }
+}
+
+function applyRoleTheme() {
+  const body = document.body;
+  if (!body) return;
+  body.classList.remove("role-dad", "role-caregiver");
+  body.classList.add(state.role === "caregiver" ? "role-caregiver" : "role-dad");
 }
 
 function renderAuthGate() {
@@ -467,7 +485,7 @@ function renderDadView() {
   for (const msg of state.messages) {
     if (msg.hidden_for_dad) continue;
     visibleCount += 1;
-    thread.appendChild(renderBubble(msg));
+    thread.appendChild(renderBubble(msg, { viewerRole: "dad" }));
   }
 
   form.addEventListener("submit", async (e) => {
@@ -503,12 +521,12 @@ function renderCaregiverView() {
 
   const tabs = node.getElementById("tabs");
   const outboxStatus = node.getElementById("outboxStatus");
+  applyCaregiverUiTokens(thread, state.caregiverUI);
 
   let visibleCount = 0;
   for (const msg of state.messages) {
-    if (msg.hidden_for_dad) continue;
     visibleCount += 1;
-    thread.appendChild(renderBubble(msg));
+    thread.appendChild(renderBubble(msg, { viewerRole: "caregiver" }));
   }
 
   const panes = node.querySelectorAll(".pane");
@@ -545,8 +563,9 @@ function renderCaregiverView() {
 
   wireImageSize(node);
   wireCaregiverImage(node);
-  wireEditQueue(node);
+  wireThreadMessageActions(thread);
   wireDadUiPane(node);
+  wireCaregiverUiPane(node);
   wireAiRulesPane(node);
 
   outboxStatus.textContent = outboxSummary();
@@ -633,39 +652,156 @@ function wireCaregiverImage(root) {
   renderPreview();
 }
 
-function wireEditQueue(root) {
-  const queue = root.getElementById("editQueue");
-  queue.innerHTML = "<h3>History Edit Queue</h3>";
-  const recent = [...state.messages].slice(-6).reverse();
-  for (const msg of recent) {
-    const row = document.createElement("div");
-    row.className = "queue-item";
-    const label = document.createElement("span");
-    label.textContent = truncate(msg.content || "[image]", 46);
-    const actions = document.createElement("div");
+function wireThreadMessageActions(threadEl) {
+  const LONG_PRESS_MS = 550;
+  const LONG_PRESS_MOVE_PX = 12;
+  let longPressTimer = null;
+  let pressStartX = 0;
+  let pressStartY = 0;
+  let pressMessageId = null;
+  let suppressContextMenuUntil = 0;
 
-    const editBtn = document.createElement("button");
-    editBtn.textContent = "Edit";
-    editBtn.addEventListener("click", async () => {
-      const next = prompt("Edit message text", msg.content || "");
-      if (next == null) return;
-      await editMessage(msg.id, next.trim());
-      await loadMessages();
-      render();
-    });
+  const clearLongPress = () => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    }
+    pressMessageId = null;
+  };
 
-    const hideBtn = document.createElement("button");
-    hideBtn.textContent = msg.hidden_for_dad ? "Unhide" : "Hide";
-    hideBtn.addEventListener("click", async () => {
-      await hideMessageForDad(msg.id, !msg.hidden_for_dad);
-      await loadMessages();
-      render();
-    });
+  threadEl.addEventListener("contextmenu", (event) => {
+    const bubble = event.target.closest(".bubble[data-message-id]");
+    if (!bubble) return;
+    event.preventDefault();
+    if (Date.now() < suppressContextMenuUntil) return;
+    const messageId = bubble.dataset.messageId;
+    const msg = state.messages.find((m) => m.id === messageId);
+    if (!msg) return;
+    openMessageContextMenu(event.clientX, event.clientY, msg);
+  });
 
-    actions.append(editBtn, hideBtn);
-    row.append(label, actions);
-    queue.appendChild(row);
+  threadEl.addEventListener("pointerdown", (event) => {
+    const bubble = event.target.closest(".bubble[data-message-id]");
+    if (!bubble) return;
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    clearLongPress();
+    pressStartX = event.clientX;
+    pressStartY = event.clientY;
+    pressMessageId = bubble.dataset.messageId;
+    longPressTimer = setTimeout(() => {
+      const msg = state.messages.find((m) => m.id === pressMessageId);
+      if (!msg) return;
+      suppressContextMenuUntil = Date.now() + 800;
+      openMessageContextMenu(pressStartX, pressStartY, msg);
+      clearLongPress();
+    }, LONG_PRESS_MS);
+  });
+
+  threadEl.addEventListener("pointermove", (event) => {
+    if (!longPressTimer) return;
+    const dx = Math.abs(event.clientX - pressStartX);
+    const dy = Math.abs(event.clientY - pressStartY);
+    if (dx > LONG_PRESS_MOVE_PX || dy > LONG_PRESS_MOVE_PX) {
+      clearLongPress();
+    }
+  });
+
+  threadEl.addEventListener("pointerup", clearLongPress);
+  threadEl.addEventListener("pointercancel", clearLongPress);
+  threadEl.addEventListener("pointerleave", clearLongPress);
+}
+
+function dismissMessageContextMenu() {
+  if (activeMessageMenu) {
+    activeMessageMenu.remove();
+    activeMessageMenu = null;
   }
+  if (activeMenuOutsideHandler) {
+    document.removeEventListener("pointerdown", activeMenuOutsideHandler, true);
+    activeMenuOutsideHandler = null;
+  }
+  if (activeMenuEscapeHandler) {
+    document.removeEventListener("keydown", activeMenuEscapeHandler, true);
+    activeMenuEscapeHandler = null;
+  }
+}
+
+function openMessageContextMenu(x, y, msg) {
+  dismissMessageContextMenu();
+  const menu = document.createElement("div");
+  menu.className = "message-context-menu";
+
+  const status = document.createElement("div");
+  status.className = "menu-title";
+  status.textContent = truncate(msg.content || "[Image message]", 48);
+  menu.appendChild(status);
+
+  const addAction = (label, action, danger = false) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = label;
+    if (danger) btn.classList.add("danger");
+    btn.addEventListener("click", async () => {
+      dismissMessageContextMenu();
+      try {
+        await action();
+      } catch (err) {
+        alert(String(err?.message || err || "Action failed"));
+      }
+    });
+    menu.appendChild(btn);
+  };
+
+  addAction("Edit", async () => {
+    const next = prompt("Edit message text", msg.content || "");
+    if (next == null) return;
+    await editMessage(msg.id, next.trim());
+    await loadMessages();
+    render();
+  });
+
+  const hideLabel = msg.hidden_for_dad ? "Unhide from Dad" : "Hide from Dad";
+  addAction(hideLabel, async () => {
+    await hideMessageForDad(msg.id, !msg.hidden_for_dad);
+    await loadMessages();
+    render();
+  });
+
+  addAction(
+    "Delete permanently",
+    async () => {
+      const ok = confirm("Delete this message permanently?");
+      if (!ok) return;
+      await deleteMessage(msg.id);
+      await loadMessages();
+      render();
+    },
+    true
+  );
+
+  document.body.appendChild(menu);
+  activeMessageMenu = menu;
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+
+  const rect = menu.getBoundingClientRect();
+  const paddedX = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8));
+  const paddedY = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
+  menu.style.left = `${paddedX}px`;
+  menu.style.top = `${paddedY}px`;
+
+  activeMenuOutsideHandler = (event) => {
+    if (activeMessageMenu && !activeMessageMenu.contains(event.target)) {
+      dismissMessageContextMenu();
+    }
+  };
+  activeMenuEscapeHandler = (event) => {
+    if (event.key === "Escape") {
+      dismissMessageContextMenu();
+    }
+  };
+  document.addEventListener("pointerdown", activeMenuOutsideHandler, true);
+  document.addEventListener("keydown", activeMenuEscapeHandler, true);
 }
 
 function wireDadUiPane(root) {
@@ -674,17 +810,14 @@ function wireDadUiPane(root) {
   const bubbleWidth = root.getElementById("bubbleWidth");
   const previewBtn = root.getElementById("previewSettings");
   const applyBtn = root.getElementById("applySettings");
-  const lockDadRole = root.getElementById("lockDadRole");
   const note = root.getElementById("previewNote");
   const previewThread = root.getElementById("dadUiPreviewThread");
-  if (!fontScale || !theme || !bubbleWidth || !previewBtn || !applyBtn || !note || !lockDadRole)
-    return;
+  if (!fontScale || !theme || !bubbleWidth || !previewBtn || !applyBtn || !note) return;
 
   const currentDraft = state.previewDadUI || { ...state.appliedDadUI };
   fontScale.value = String(currentDraft.fontScale);
   theme.value = currentDraft.theme;
   bubbleWidth.value = String(currentDraft.bubbleWidth);
-  lockDadRole.checked = Boolean(state.roleLockEnabled);
 
   const saveDraftFromControls = () => {
     state.previewDadUI = {
@@ -693,7 +826,6 @@ function wireDadUiPane(root) {
       bubbleWidth: Number(bubbleWidth.value),
       imageSize: state.appliedDadUI.imageSize || "medium",
     };
-    state.roleLockEnabled = lockDadRole.checked;
     localStorage.setItem(DAD_UI_DRAFT_KEY, JSON.stringify(state.previewDadUI));
   };
 
@@ -717,11 +849,6 @@ function wireDadUiPane(root) {
     updatePreview();
     note.textContent = "Draft updated. Click 'Apply to Dad' when ready.";
   });
-  lockDadRole.addEventListener("change", () => {
-    state.roleLockEnabled = lockDadRole.checked;
-    note.textContent = "Role lock draft updated. Click 'Apply to Dad' when ready.";
-  });
-
   previewBtn.addEventListener("click", () => {
     saveDraftFromControls();
     updatePreview();
@@ -754,6 +881,30 @@ function wireDadUiPane(root) {
   });
 
   updatePreview();
+}
+
+function wireCaregiverUiPane(root) {
+  const fontScale = root.getElementById("caregiverFontScale");
+  const theme = root.getElementById("caregiverTheme");
+  const bubbleWidth = root.getElementById("caregiverBubbleWidth");
+  const applyBtn = root.getElementById("applyCaregiverUi");
+  const status = root.getElementById("caregiverUiStatus");
+  if (!fontScale || !theme || !bubbleWidth || !applyBtn || !status) return;
+
+  fontScale.value = String(state.caregiverUI.fontScale || 18);
+  theme.value = state.caregiverUI.theme || "clear";
+  bubbleWidth.value = String(state.caregiverUI.bubbleWidth || 84);
+
+  applyBtn.addEventListener("click", () => {
+    state.caregiverUI = {
+      fontScale: Number(fontScale.value),
+      theme: theme.value,
+      bubbleWidth: Number(bubbleWidth.value),
+    };
+    localStorage.setItem(CAREGIVER_UI_KEY, JSON.stringify(state.caregiverUI));
+    status.textContent = "Applied to caregiver view.";
+    render();
+  });
 }
 
 async function saveDadUiDraftCompat() {
@@ -820,9 +971,18 @@ function wireAiRulesPane(root) {
   });
 }
 
-function renderBubble(msg) {
+function renderBubble(msg, options = {}) {
+  const viewerRole = options.viewerRole || state.role;
+  const isHiddenForDadInCaregiverView = viewerRole === "caregiver" && msg.hidden_for_dad;
   const bubble = document.createElement("article");
   bubble.className = `bubble ${msg.sender_role === "caregiver" ? "me" : ""}`;
+  if (isHiddenForDadInCaregiverView) {
+    bubble.classList.add("hidden-for-dad-muted");
+  }
+  if (viewerRole === "caregiver") {
+    bubble.classList.add("is-actionable");
+  }
+  bubble.dataset.messageId = msg.id;
   if (msg.image_url) {
     const img = document.createElement("img");
     const imageSize = msg.image_size || "medium";
@@ -857,6 +1017,21 @@ function applyDadUiTokens(threadEl, prefs) {
   } else if (prefs.theme === "warm") {
     threadEl.style.background = "#fffaf0";
     threadEl.style.color = "#1f2937";
+  }
+}
+
+function applyCaregiverUiTokens(threadEl, prefs) {
+  threadEl.style.fontSize = `${prefs.fontScale || 18}px`;
+  threadEl.style.setProperty("--dad-bubble-width", `${prefs.bubbleWidth || 84}%`);
+  if (prefs.theme === "dark") {
+    threadEl.style.background = "#0f172a";
+    threadEl.style.color = "#f9fafb";
+  } else if (prefs.theme === "warm") {
+    threadEl.style.background = "#fffaf0";
+    threadEl.style.color = "#1f2937";
+  } else {
+    threadEl.style.background = "#eff6ff";
+    threadEl.style.color = "#0f172a";
   }
 }
 
@@ -1057,6 +1232,30 @@ async function hideMessageForDad(messageId, hide) {
   if (error) throw new Error(error.message);
 }
 
+async function deleteMessage(messageId) {
+  if (!messageId) return;
+  if (!supabase) {
+    const local = readJson(LOCAL_MSG_KEY, []);
+    const next = local.filter((m) => m.id !== messageId);
+    localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(next));
+    return;
+  }
+  const { error } = await supabase.rpc("caregiver_delete_message", {
+    p_message_id: messageId,
+    p_reason: "caregiver_delete",
+  });
+  if (!error) return;
+
+  const msg = String(error.message || "").toLowerCase();
+  const missingFn = msg.includes("could not find the function") || msg.includes("schema cache");
+  if (missingFn) {
+    throw new Error(
+      "Delete RPC is not deployed yet. Run the new SQL function migration, then retry."
+    );
+  }
+  throw new Error(error.message);
+}
+
 function startOutboxSyncLoop() {
   const ms = Number(config.OUTBOX_SYNC_MS || 5000);
   setInterval(async () => {
@@ -1091,12 +1290,22 @@ function isDadRoleLocked() {
   );
 }
 
+function isAuthedDad() {
+  return Boolean(state.session && state.profile?.role === "dad");
+}
+
 function enforceRoleLock() {
   if (isDadRoleLocked()) {
     state.role = "dad";
     roleSelect.value = "dad";
-    if (rolePicker) rolePicker.style.display = "none";
     localStorage.setItem(ROLE_KEY, "dad");
+  }
+  // Keep Dad accounts in Dad view mode and hide the role picker.
+  if (isAuthedDad()) {
+    state.role = "dad";
+    roleSelect.value = "dad";
+    localStorage.setItem(ROLE_KEY, "dad");
+    if (rolePicker) rolePicker.style.display = "none";
     return;
   }
   if (rolePicker) rolePicker.style.display = "";

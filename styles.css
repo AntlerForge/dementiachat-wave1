@@ -109,11 +109,42 @@ button {
   border-radius: 8px;
   padding: 8px 10px;
   font-size: 1rem;
+  color: var(--text);
+  background: #ffffff;
 }
 
 button {
-  background: #ffffff;
   cursor: pointer;
+  min-width: 72px;
+  white-space: nowrap;
+  font-weight: 600;
+  -webkit-text-fill-color: var(--text);
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+body.role-caregiver button {
+  background: #dbeafe;
+  border-color: #93c5fd;
+  color: #1e3a8a;
+  -webkit-text-fill-color: #1e3a8a;
+}
+
+body.role-caregiver .composer button {
+  background: #2563eb;
+  border-color: #1d4ed8;
+  color: #ffffff;
+  -webkit-text-fill-color: #ffffff;
+}
+
+body.role-caregiver .tabs button.active {
+  background: #bfdbfe;
+  border-color: #60a5fa;
+  color: #1e3a8a;
+}
+
+body.role-caregiver button:hover {
+  filter: brightness(0.97);
 }
 
 button:focus,
@@ -149,28 +180,51 @@ select:focus {
   gap: 6px;
 }
 
-.queue {
-  margin-top: 12px;
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
-  min-height: 140px;
-  height: calc(100vh - 520px);
-  overflow: auto;
-  padding-right: 4px;
-}
-
-.queue-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  margin: 6px 0;
-}
-
 .status {
   margin-top: 8px;
   color: #0f172a;
   font-size: 0.9rem;
+}
+
+.bubble.hidden-for-dad-muted {
+  opacity: 0.6;
+  background: #f3f4f6;
+  border-style: dashed;
+}
+
+.bubble.is-actionable {
+  cursor: context-menu;
+}
+
+.message-context-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 220px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.22);
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.message-context-menu .menu-title {
+  color: var(--muted);
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--line);
+  padding: 2px 4px 8px;
+}
+
+.message-context-menu button {
+  min-height: 36px;
+  text-align: left;
+  padding: 8px 10px;
+}
+
+.message-context-menu button.danger {
+  color: #991b1b;
+  border-color: #fecaca;
 }
 
 .dad-ui-preview .thread {
@@ -180,6 +234,12 @@ select:focus {
 
 .image-actions {
   grid-template-columns: 1fr 1fr;
+}
+
+.row input[type="file"] {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .image-preview {
@@ -220,10 +280,6 @@ select:focus {
     height: calc(100vh - 360px);
   }
 
-  .queue {
-    height: calc(100vh - 520px);
-  }
-
   .tabs {
     position: fixed;
     left: 0;
@@ -237,5 +293,9 @@ select:focus {
 
   .tabs button {
     flex: 1;
+  }
+
+  .image-actions {
+    grid-template-columns: 1fr;
   }
 }
