@@ -1409,6 +1409,10 @@ async function loadMessages() {
     await ensureConversation();
   }
   if (supabase) {
+    if (!state.conversationId) {
+      console.warn("loadMessages: no conversation id yet");
+      return;
+    }
     // Newest first + limit, then reverse for display. Ascending + limit(200) only returned the
     // *oldest* 200 rows — new messages vanished from the UI while push still saw them in the DB.
     const { data, error } = await supabase
@@ -1429,12 +1433,38 @@ async function loadMessages() {
       return;
     }
 
+    // Avoid wiping the thread: some clients return data: null with no error on odd failures.
+    if (data == null) {
+      console.warn("Messages query returned no data array; keeping prior messages.");
+      if (!Array.isArray(state.messages) || state.messages.length === 0) {
+        state.messages = readJson(LOCAL_MSG_KEY, []);
+      }
+      return;
+    }
+
     const rows = Array.isArray(data) ? data : [];
     state.messages = [...rows].reverse();
     localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(state.messages));
     return;
   }
   state.messages = readJson(LOCAL_MSG_KEY, []);
+}
+
+/** Put server row into state after insert so the thread updates even if the next SELECT fails. */
+function mergeServerMessageIntoState(row) {
+  if (!row || !row.id) return;
+  const rid = String(row.id);
+  const cid = String(row.client_msg_id || "");
+  const next = state.messages.filter((m) => {
+    if (String(m.id) === rid) return false;
+    if (cid && String(m.client_msg_id || "") === cid) return false;
+    return true;
+  });
+  next.push(row);
+  state.messages = next.sort((a, b) =>
+    String(a.created_at || "").localeCompare(String(b.created_at || ""))
+  );
+  localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(state.messages));
 }
 
 async function queueMessage(content, senderRole) {
@@ -1524,16 +1554,22 @@ async function sendRemote(msg) {
     image_size: msg.image_size,
     hidden_for_dad: false,
   };
-  const insertOnce = async () => supabase.from("messages").insert(payload);
-  let { error } = await insertOnce();
+  const insertOnce = async () =>
+    supabase.from("messages").insert(payload).select("*").maybeSingle();
+  let { data: insertedRow, error } = await insertOnce();
   if (error && shouldRetryAfterMembershipRepair(error)) {
     await ensureConversationMembership(msg.conversation_id);
     const retry = await insertOnce();
     error = retry.error;
+    insertedRow = retry.data;
   }
   if (error) {
     const code = error.code ? `[${error.code}] ` : "";
     throw new Error(`${code}${error.message || "Insert failed"}`);
+  }
+
+  if (insertedRow) {
+    mergeServerMessageIntoState(insertedRow);
   }
 
   if (msg.sender_role === "dad" && Number(state.trustRules.trustLevel) === 3) {
