@@ -244,7 +244,7 @@ async function loadRemoteSettings() {
   if (uiData) {
     state.appliedDadUI = {
       fontScale: uiData.font_scale,
-      uiFontScale: state.appliedDadUI.uiFontScale || 16,
+      uiFontScale: uiData.ui_font_scale || state.appliedDadUI.uiFontScale || 16,
       theme: uiData.theme,
       bubbleWidth: uiData.bubble_width,
       imageSize: uiData.image_default_size || "medium",
@@ -900,6 +900,8 @@ function wireDadUiPane(root) {
           p_conversation_id: state.conversationId,
         });
         if (applyErr) throw applyErr;
+        const { error: uiFontErr } = await saveDadUiFontScaleCompat();
+        if (uiFontErr) throw uiFontErr;
       }
       state.appliedDadUI = { ...state.previewDadUI };
       localStorage.setItem(DAD_UI_KEY, JSON.stringify(state.appliedDadUI));
@@ -911,6 +913,26 @@ function wireDadUiPane(root) {
   });
 
   updatePreview();
+}
+
+async function saveDadUiFontScaleCompat() {
+  const payload = {
+    p_conversation_id: state.conversationId,
+    p_ui_font_scale: Number(state.previewDadUI?.uiFontScale || 16),
+  };
+  const v1 = await supabase.rpc("save_dad_ui_font_scale", payload);
+  if (!v1.error) return v1;
+
+  const msg = String(v1.error.message || "").toLowerCase();
+  const missingSig = msg.includes("could not find the function") || msg.includes("schema cache");
+  if (!missingSig) return v1;
+
+  return {
+    data: null,
+    error: new Error(
+      "Dad UI font sync needs SQL update: run save_dad_ui_font_scale migration in Supabase."
+    ),
+  };
 }
 
 function wireCaregiverUiPane(root) {

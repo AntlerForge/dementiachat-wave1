@@ -60,11 +60,13 @@ create table if not exists dad_ui_profiles (
   id uuid primary key default gen_random_uuid(),
   conversation_id uuid not null unique references conversations(id) on delete cascade,
   font_scale integer not null default 22 check (font_scale between 12 and 34),
+  ui_font_scale integer not null default 16 check (ui_font_scale between 12 and 24),
   theme text not null default 'high-contrast' check (theme in ('high-contrast', 'warm', 'dark')),
   bubble_width integer not null default 80 check (bubble_width between 60 and 95),
   image_default_size text not null default 'medium' check (image_default_size in ('small', 'medium', 'large')),
   role_lock_enabled boolean not null default false,
   draft_font_scale integer check (draft_font_scale between 12 and 34),
+  draft_ui_font_scale integer check (draft_ui_font_scale between 12 and 24),
   draft_theme text check (draft_theme in ('high-contrast', 'warm', 'dark')),
   draft_bubble_width integer check (draft_bubble_width between 60 and 95),
   draft_image_default_size text check (draft_image_default_size in ('small', 'medium', 'large')),
@@ -83,6 +85,20 @@ alter table dad_ui_profiles
 alter table dad_ui_profiles
   add constraint dad_ui_profiles_draft_font_scale_check check (
     draft_font_scale is null or draft_font_scale between 12 and 34
+  );
+alter table dad_ui_profiles
+  add column if not exists ui_font_scale integer not null default 16;
+alter table dad_ui_profiles
+  add column if not exists draft_ui_font_scale integer;
+alter table dad_ui_profiles
+  drop constraint if exists dad_ui_profiles_ui_font_scale_check;
+alter table dad_ui_profiles
+  add constraint dad_ui_profiles_ui_font_scale_check check (ui_font_scale between 12 and 24);
+alter table dad_ui_profiles
+  drop constraint if exists dad_ui_profiles_draft_ui_font_scale_check;
+alter table dad_ui_profiles
+  add constraint dad_ui_profiles_draft_ui_font_scale_check check (
+    draft_ui_font_scale is null or draft_ui_font_scale between 12 and 24
   );
 
 create table if not exists trust_rules (
@@ -392,6 +408,33 @@ begin
 
   insert into activity_events (conversation_id, actor_id, event_type, payload)
   values (p_conversation_id, auth.uid(), 'dad_ui_applied', '{}'::jsonb);
+
+  return v_profile;
+end;
+$$;
+
+create or replace function save_dad_ui_font_scale(
+  p_conversation_id uuid,
+  p_ui_font_scale integer
+)
+returns dad_ui_profiles
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_profile dad_ui_profiles;
+begin
+  if not is_caregiver_admin(p_conversation_id) then
+    raise exception 'Not authorized';
+  end if;
+
+  insert into dad_ui_profiles (conversation_id, ui_font_scale)
+  values (p_conversation_id, p_ui_font_scale)
+  on conflict (conversation_id) do update
+  set ui_font_scale = excluded.ui_font_scale,
+      updated_at = now()
+  returning * into v_profile;
 
   return v_profile;
 end;
