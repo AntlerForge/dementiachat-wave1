@@ -1409,15 +1409,17 @@ async function loadMessages() {
     await ensureConversation();
   }
   if (supabase) {
+    // Newest first + limit, then reverse for display. Ascending + limit(200) only returned the
+    // *oldest* 200 rows — new messages vanished from the UI while push still saw them in the DB.
     const { data, error } = await supabase
       .from("messages")
       .select("*")
       .eq("conversation_id", state.conversationId)
-      .order("created_at", { ascending: true })
+      .order("created_at", { ascending: false })
       .limit(200);
     if (!error && data) {
-      state.messages = data;
-      localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(data));
+      state.messages = [...data].reverse();
+      localStorage.setItem(LOCAL_MSG_KEY, JSON.stringify(state.messages));
       return;
     }
     console.warn("Remote load failed, using local cache.", error);
@@ -1649,7 +1651,9 @@ function startMessageRefreshLoop() {
     await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
     handleDadInboundAlerts(beforeMessages, state.messages);
     const afterSig = appStateSignature();
-    if (beforeSig !== afterSig && !isUserEditingControl()) {
+    const messagesChanged =
+      messagesSignature(beforeMessages) !== messagesSignature(state.messages);
+    if (beforeSig !== afterSig && (!isUserEditingControl() || messagesChanged)) {
       render();
     }
   }, ms);
