@@ -1,4 +1,4 @@
-const CACHE_NAME = "carechat-wave1-v6";
+const CACHE_NAME = "carechat-wave1-v7";
 const ASSETS = [
   "./",
   "./index.html",
@@ -60,6 +60,13 @@ self.addEventListener("fetch", (event) => {
         })
         .catch(() => caches.match(event.request))
     );
+    return;
+  }
+  // Never cache cross-origin APIs (e.g. Supabase REST). The previous cache-first+put path cached
+  // GET /rest/v1/messages — mutations are POST (not intercepted) so the DB updated but every
+  // poll/loadMessages kept serving the first cached JSON; edits/deletes/new rows never appeared.
+  if (url.origin !== self.location.origin) {
+    event.respondWith(fetch(event.request));
     return;
   }
   event.respondWith(
