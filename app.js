@@ -215,9 +215,50 @@ async function ensureProfile() {
   state.profile = data;
 }
 
+function getSharedConversationId() {
+  const raw = config.SHARED_CONVERSATION_ID;
+  if (raw == null || raw === "") return "";
+  return String(raw).trim();
+}
+
+/**
+ * When SHARED_CONVERSATION_ID is set, we must stay on that conversation. Previously, any join error
+ * fell through to create_or_join(null) and opened a *new* random conversation while localStorage
+ * still looked "valid" — sends/notifications used one id, loadMessages another. Alerts fired but the
+ * chat thread stayed empty or showed ghost rows from carechat.local_messages.
+ */
 async function ensureConversation() {
-  if (config.SHARED_CONVERSATION_ID) {
-    state.conversationId = config.SHARED_CONVERSATION_ID;
+  if (!supabase) return;
+
+  const shared = getSharedConversationId();
+
+  if (shared) {
+    const prev = String(state.conversationId || localStorage.getItem(CONVERSATION_KEY) || "");
+    if (prev && prev !== shared) {
+      try {
+        localStorage.removeItem(LOCAL_MSG_KEY);
+        localStorage.setItem(OUTBOX_KEY, JSON.stringify([]));
+      } catch {
+        /* noop */
+      }
+      state.messages = [];
+      state.outbox = [];
+    }
+    state.conversationId = shared;
+    const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
+    const { error: joinErr } = await supabase.rpc("create_or_join_conversation", {
+      p_conversation_id: state.conversationId,
+      p_member_role: joinRole,
+    });
+    if (joinErr) {
+      throw new Error(`Join shared conversation failed: ${joinErr.message}`);
+    }
+    localStorage.setItem(CONVERSATION_KEY, state.conversationId);
+    return;
+  }
+
+  if (!state.conversationId) {
+    state.conversationId = localStorage.getItem(CONVERSATION_KEY) || null;
   }
   if (state.conversationId) {
     const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
@@ -229,6 +270,7 @@ async function ensureConversation() {
       localStorage.setItem(CONVERSATION_KEY, state.conversationId);
       return;
     }
+    console.warn("Re-join existing conversation failed, creating new.", joinErr);
   }
   const memberRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
   const { data, error } = await supabase.rpc("create_or_join_conversation", {
@@ -1405,7 +1447,7 @@ function playDadAlertSound() {
 }
 
 async function loadMessages() {
-  if (!state.conversationId && supabase && state.session) {
+  if (supabase && state.session) {
     await ensureConversation();
   }
   if (supabase) {
@@ -1468,7 +1510,7 @@ function mergeServerMessageIntoState(row) {
 }
 
 async function queueMessage(content, senderRole) {
-  if (!state.conversationId && supabase && state.session) {
+  if (supabase && state.session) {
     await ensureConversation();
   }
   const message = {
@@ -1489,7 +1531,7 @@ async function queueMessage(content, senderRole) {
 }
 
 async function queueImageMessage(imageUrl, senderRole, imageSize) {
-  if (!state.conversationId && supabase && state.session) {
+  if (supabase && state.session) {
     await ensureConversation();
   }
   const message = {
