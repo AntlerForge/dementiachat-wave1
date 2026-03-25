@@ -1,4 +1,4 @@
-const CACHE_NAME = "carechat-wave1-v4";
+const CACHE_NAME = "carechat-wave1-v5";
 const ASSETS = [
   "./",
   "./index.html",
@@ -7,6 +7,23 @@ const ASSETS = [
   "./config.js",
   "./manifest.webmanifest",
 ];
+
+function isCriticalShellRequest(request) {
+  if (request.mode === "navigate") return true;
+  try {
+    const url = new URL(request.url);
+    if (url.origin !== self.location.origin) return false;
+    const p = url.pathname;
+    return (
+      p.endsWith("/app.js") ||
+      p.endsWith("/config.js") ||
+      p.endsWith("/styles.css") ||
+      p.endsWith("/index.html")
+    );
+  } catch {
+    return false;
+  }
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -25,12 +42,34 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  const url = new URL(event.request.url);
+  // Always hit network for the worker script so deploys can update; never serve stale sw.js from cache.
+  if (url.pathname.endsWith("/sw.js")) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
+  if (isCriticalShellRequest(event.request)) {
+    event.respondWith(
+      fetch(event.request)
+        .then((resp) => {
+          if (resp.ok) {
+            const copy = resp.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          }
+          return resp;
+        })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached;
       return fetch(event.request).then((resp) => {
         const copy = resp.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        if (resp.ok) {
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
         return resp;
       });
     })
