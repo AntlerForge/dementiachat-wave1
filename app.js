@@ -11,6 +11,8 @@ const CONVERSATION_KEY = "carechat.conversation_id";
 const AUTH_EMAIL_KEY = "carechat.auth_email";
 const AUTH_CODE_KEY = "carechat.auth_code";
 const AUTH_COOLDOWN_KEY = "carechat.auth_cooldown_until";
+const EMAIL_OTP_MIN_LEN = 6;
+const EMAIL_OTP_MAX_LEN = 12;
 const LOCAL_MODE_KEY = "carechat.local_mode";
 const DAD_DRAFT_KEY = "carechat.dad_draft";
 const CAREGIVER_DRAFT_KEY = "carechat.caregiver_draft";
@@ -329,7 +331,11 @@ function renderAuthGate() {
   wrapper.className = "panel";
   wrapper.innerHTML = `
     <h2>Sign in to Care Chat</h2>
-    <p class="subtext">Preferred: email code (OTP). Magic link also remains supported.</p>
+    <p class="subtext">
+      <strong>iPhone / Home Screen app:</strong> use the <strong>sign-in code</strong> from the email below — links open in
+      Safari and won’t finish sign-in inside the installed app. If your email has no code, add
+      <code>{{ .Token }}</code> to the Magic Link template in Supabase (Authentication → Email Templates).
+    </p>
     <form id="authSendForm" class="row">
       <label>Email</label>
       <input id="authEmail" type="email" placeholder="you@example.com" required />
@@ -341,11 +347,12 @@ function renderAuthGate() {
       <button id="sendAuthEmail" type="submit">Send sign-in email</button>
     </form>
     <form id="authVerifyForm" class="row">
-      <label>6-digit code (if provided by email)</label>
-      <input id="authCode" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" />
+      <label>Sign-in code from email (numbers only)</label>
+      <input id="authCode" type="text" inputmode="numeric" pattern="[0-9]{${EMAIL_OTP_MIN_LEN},${EMAIL_OTP_MAX_LEN}}" maxlength="${EMAIL_OTP_MAX_LEN}" placeholder="12345678" />
       <button id="verifyAuthCode" type="submit">Verify code</button>
     </form>
-    <div class="row">
+    <div class="row auth-actions">
+      <button id="reloadApp" type="button">Reload app</button>
       <button id="useLocalMode" type="button">Continue without sign-in (local demo)</button>
     </div>
     <details>
@@ -363,6 +370,7 @@ function renderAuthGate() {
   const sendBtn = wrapper.querySelector("#sendAuthEmail");
   const verifyBtn = wrapper.querySelector("#verifyAuthCode");
   const localModeBtn = wrapper.querySelector("#useLocalMode");
+  const reloadBtn = wrapper.querySelector("#reloadApp");
   const debugBox = wrapper.querySelector("#authDebug");
   roleHint.value = state.roleHint;
   emailInput.value = state.authEmailDraft;
@@ -409,7 +417,7 @@ function renderAuthGate() {
     localStorage.setItem(AUTH_EMAIL_KEY, state.authEmailDraft);
   });
   codeInput.addEventListener("input", () => {
-    state.authCodeDraft = codeInput.value.replace(/\D/g, "").slice(0, 6);
+    state.authCodeDraft = codeInput.value.replace(/\D/g, "").slice(0, EMAIL_OTP_MAX_LEN);
     codeInput.value = state.authCodeDraft;
     localStorage.setItem(AUTH_CODE_KEY, state.authCodeDraft);
   });
@@ -431,7 +439,7 @@ function renderAuthGate() {
       state.authCooldownUntil = Date.now() + 60_000;
       localStorage.setItem(AUTH_COOLDOWN_KEY, String(state.authCooldownUntil));
       status.textContent =
-        "Sign-in email sent. Enter the 6-digit code if present, or open the magic link.";
+        "Sign-in email sent. Enter the code from the email here (check spam). On iPhone, avoid the email link if you opened this from the Home Screen icon.";
       state.authDebug.lastError = "";
       state.authDebug.lastCallback = "otp_or_link_sent";
       refreshDiagnostics();
@@ -458,8 +466,8 @@ function renderAuthGate() {
       status.textContent = "Enter email first.";
       return;
     }
-    if (!/^\d{6}$/.test(token)) {
-      status.textContent = "Enter a valid 6-digit code.";
+    if (!new RegExp(`^\\d{${EMAIL_OTP_MIN_LEN},${EMAIL_OTP_MAX_LEN}}$`).test(token)) {
+      status.textContent = `Enter the full code from the email (${EMAIL_OTP_MIN_LEN}–${EMAIL_OTP_MAX_LEN} digits).`;
       return;
     }
     verifyBtn.disabled = true;
@@ -493,6 +501,12 @@ function renderAuthGate() {
     localStorage.setItem(LOCAL_MODE_KEY, "1");
     window.location.href = `${window.location.origin}${window.location.pathname}`;
   });
+  if (reloadBtn) {
+    reloadBtn.addEventListener("click", () => {
+      const base = `${window.location.origin}${window.location.pathname}`;
+      window.location.href = `${base}?cloud=1`;
+    });
+  }
   wrapper.addEventListener("DOMNodeRemoved", () => clearInterval(cooldownTimer), { once: true });
   appRoot.appendChild(wrapper);
 }
