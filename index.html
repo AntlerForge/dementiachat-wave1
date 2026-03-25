@@ -43,6 +43,14 @@
         </nav>
 
         <section data-pane="chat" class="pane active">
+          <div id="dadAlertBanner" class="dad-alert-banner" hidden>
+            <div id="dadAlertText"></div>
+            <div class="dad-alert-actions">
+              <button id="enableAlerts" type="button">Enable alerts</button>
+              <button id="clearDadAlert" type="button">Clear alert</button>
+            </div>
+          </div>
+          <p id="dadTypingIndicator" class="typing-indicator" hidden>Dad is typing...</p>
           <div id="caregiverThread" class="thread"></div>
           <form id="caregiverComposer" class="composer">
             <input id="caregiverInput" autocomplete="off" placeholder="Reply to Dad..." />

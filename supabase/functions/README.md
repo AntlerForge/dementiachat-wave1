@@ -19,3 +19,24 @@ Security notes:
 - Keep service role key server-side only
 - Restrict invocation (cron/scheduler only)
 - Do not expose this as an unauthenticated public API
+
+## push-dispatcher
+
+Purpose:
+- Claim pending rows from `notification_jobs`
+- Deliver Web Push notifications to active `push_subscriptions`
+- Mark jobs as sent or retry with backoff
+
+Environment variables required:
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `PUSH_VAPID_PUBLIC_KEY`
+- `PUSH_VAPID_PRIVATE_KEY`
+- `PUSH_VAPID_SUBJECT` (e.g. `mailto:you@example.com`)
+
+Suggested schedule:
+- Run every 30-60 seconds for near-real-time push
+
+Security notes:
+- Keep VAPID private key server-side only
+- Restrict invocation (cron/scheduler only)

@@ -5,6 +5,10 @@ window.APP_CONFIG = {
   // Optional: force both users into a known conversation UUID.
   SHARED_CONVERSATION_ID: "",
 
+  // Web Push (Safari iOS/macOS and other modern browsers).
+  // Generated server-side as VAPID public key.
+  PUSH_VAPID_PUBLIC_KEY: "",
+
   // Polling interval for local outbox retry loop (ms).
   OUTBOX_SYNC_MS: 5000,
 

@@ -136,6 +136,42 @@ create table if not exists activity_events (
   created_at timestamptz not null default now()
 );
 
+create table if not exists push_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references profiles(id) on delete cascade,
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  endpoint text not null,
+  p256dh text not null,
+  auth text not null,
+  platform text not null default 'web',
+  user_agent text not null default '',
+  is_active boolean not null default true,
+  last_seen_at timestamptz not null default now(),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, endpoint)
+);
+
+create index if not exists idx_push_subscriptions_conversation
+  on push_subscriptions(conversation_id, is_active);
+
+create table if not exists notification_jobs (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null references conversations(id) on delete cascade,
+  message_id uuid not null references messages(id) on delete cascade,
+  recipient_user_id uuid not null references profiles(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending', 'sent', 'failed')),
+  attempts integer not null default 0,
+  last_error text,
+  next_retry_at timestamptz not null default now(),
+  sent_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (message_id, recipient_user_id)
+);
+
+create index if not exists idx_notification_jobs_pending
+  on notification_jobs(status, next_retry_at, created_at);
+
 -- Auto profile bootstrap from auth metadata.
 create or replace function ensure_profile(
   p_role text default 'caregiver',
@@ -440,6 +476,73 @@ begin
 end;
 $$;
 
+create or replace function save_push_subscription(
+  p_conversation_id uuid,
+  p_endpoint text,
+  p_p256dh text,
+  p_auth text,
+  p_user_agent text default '',
+  p_platform text default 'web'
+)
+returns push_subscriptions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row push_subscriptions;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+  if not exists (
+    select 1
+    from conversation_members cm
+    where cm.conversation_id = p_conversation_id
+      and cm.user_id = auth.uid()
+  ) then
+    raise exception 'Not authorized';
+  end if;
+
+  insert into push_subscriptions (
+    user_id,
+    conversation_id,
+    endpoint,
+    p256dh,
+    auth,
+    platform,
+    user_agent,
+    is_active,
+    last_seen_at,
+    updated_at
+  )
+  values (
+    auth.uid(),
+    p_conversation_id,
+    p_endpoint,
+    p_p256dh,
+    p_auth,
+    coalesce(nullif(p_platform, ''), 'web'),
+    coalesce(p_user_agent, ''),
+    true,
+    now(),
+    now()
+  )
+  on conflict (user_id, endpoint) do update
+  set conversation_id = excluded.conversation_id,
+      p256dh = excluded.p256dh,
+      auth = excluded.auth,
+      platform = excluded.platform,
+      user_agent = excluded.user_agent,
+      is_active = true,
+      last_seen_at = now(),
+      updated_at = now()
+  returning * into v_row;
+
+  return v_row;
+end;
+$$;
+
 create or replace function save_trust_rules(
   p_conversation_id uuid,
   p_trust_level integer,
@@ -644,6 +747,38 @@ create trigger trg_messages_updated_at
 before update on messages
 for each row execute function set_updated_at();
 
+create or replace function queue_dad_message_notifications()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.sender_role <> 'dad' then
+    return new;
+  end if;
+
+  insert into notification_jobs (conversation_id, message_id, recipient_user_id, status, next_retry_at)
+  select
+    new.conversation_id,
+    new.id,
+    cm.user_id,
+    'pending',
+    now()
+  from conversation_members cm
+  where cm.conversation_id = new.conversation_id
+    and cm.member_role in ('caregiver', 'caregiver_admin')
+  on conflict (message_id, recipient_user_id) do nothing;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_messages_notify_caregiver on messages;
+create trigger trg_messages_notify_caregiver
+after insert on messages
+for each row execute function queue_dad_message_notifications();
+
 -- RLS scaffolding.
 alter table profiles enable row level security;
 alter table conversations enable row level security;
@@ -654,6 +789,8 @@ alter table dad_ui_profiles enable row level security;
 alter table trust_rules enable row level security;
 alter table delayed_outbox enable row level security;
 alter table activity_events enable row level security;
+alter table push_subscriptions enable row level security;
+alter table notification_jobs enable row level security;
 
 create or replace function is_conversation_member(_conversation_id uuid)
 returns boolean
@@ -823,3 +960,28 @@ create policy p_activity_events_insert
 on activity_events
 for insert
 with check (is_conversation_member(conversation_id));
+
+drop policy if exists p_push_subscriptions_select_self on push_subscriptions;
+create policy p_push_subscriptions_select_self
+on push_subscriptions
+for select
+using (user_id = auth.uid());
+
+drop policy if exists p_push_subscriptions_insert_self on push_subscriptions;
+create policy p_push_subscriptions_insert_self
+on push_subscriptions
+for insert
+with check (user_id = auth.uid() and is_conversation_member(conversation_id));
+
+drop policy if exists p_push_subscriptions_update_self on push_subscriptions;
+create policy p_push_subscriptions_update_self
+on push_subscriptions
+for update
+using (user_id = auth.uid())
+with check (user_id = auth.uid() and is_conversation_member(conversation_id));
+
+drop policy if exists p_push_subscriptions_delete_self on push_subscriptions;
+create policy p_push_subscriptions_delete_self
+on push_subscriptions
+for delete
+using (user_id = auth.uid());

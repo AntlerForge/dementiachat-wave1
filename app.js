@@ -16,6 +16,8 @@ const DAD_DRAFT_KEY = "carechat.dad_draft";
 const CAREGIVER_DRAFT_KEY = "carechat.caregiver_draft";
 const CAREGIVER_TAB_KEY = "carechat.caregiver_tab";
 const DAD_UI_DRAFT_KEY = "carechat.dad_ui_draft";
+const DAD_LAST_MSG_AT_KEY = "carechat.dad_last_msg_at";
+const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -24,6 +26,7 @@ const appTitle = document.getElementById("appTitle");
 let activeMessageMenu = null;
 let activeMenuOutsideHandler = null;
 let activeMenuEscapeHandler = null;
+let swRegistration = null;
 
 const config = window.APP_CONFIG || {};
 const urlParams = new URLSearchParams(window.location.search);
@@ -89,6 +92,14 @@ const state = {
   caregiverVisibleMessageCount: 0,
   dadStickToBottom: true,
   caregiverStickToBottom: true,
+  dadTyping: false,
+  dadAlertUnreadCount: 0,
+  dadAlertText: "",
+  lastDadMessageAt: localStorage.getItem(DAD_LAST_MSG_AT_KEY) || "",
+  lastDadMessageId: localStorage.getItem(DAD_LAST_MSG_ID_KEY) || "",
+  lastDadTypingEmitAt: 0,
+  lastDadTypingValue: false,
+  pushSubscribed: false,
 };
 
 init().catch((err) => {
@@ -112,10 +123,12 @@ async function init() {
   await bootstrapRemote();
   enforceRoleLock();
   await loadMessages();
+  primeDadMessageMarker();
   render();
   startOutboxSyncLoop();
   startMessageRefreshLoop();
-  setupServiceWorker();
+  await setupServiceWorker();
+  render();
 }
 
 async function processAuthCallbackIfPresent() {
@@ -495,6 +508,10 @@ function renderDadView() {
   input.addEventListener("input", () => {
     state.dadDraft = input.value;
     localStorage.setItem(DAD_DRAFT_KEY, state.dadDraft);
+    emitDadTypingStatus(input.value.trim().length > 0);
+  });
+  input.addEventListener("blur", () => {
+    emitDadTypingStatus(false, true);
   });
 
   applyUiFontScale(panel, state.appliedDadUI.uiFontScale, 16);
@@ -515,6 +532,7 @@ function renderDadView() {
     state.dadDraft = "";
     localStorage.setItem(DAD_DRAFT_KEY, "");
     await queueMessage(text, "dad");
+    emitDadTypingStatus(false, true);
     await loadMessages();
     render();
   });
@@ -541,6 +559,11 @@ function renderCaregiverView() {
 
   const tabs = node.getElementById("tabs");
   const outboxStatus = node.getElementById("outboxStatus");
+  const dadAlertBanner = node.getElementById("dadAlertBanner");
+  const dadAlertText = node.getElementById("dadAlertText");
+  const clearDadAlert = node.getElementById("clearDadAlert");
+  const enableAlerts = node.getElementById("enableAlerts");
+  const dadTypingIndicator = node.getElementById("dadTypingIndicator");
   applyUiFontScale(panel, state.caregiverUI.uiFontScale, 16);
   applyCaregiverUiTokens(thread, state.caregiverUI);
 
@@ -588,6 +611,34 @@ function renderCaregiverView() {
   wireDadUiPane(node);
   wireCaregiverUiPane(node);
   wireAiRulesPane(node);
+
+  if (dadAlertBanner && dadAlertText && clearDadAlert && enableAlerts) {
+    if (state.dadAlertUnreadCount > 0) {
+      dadAlertBanner.hidden = false;
+      dadAlertText.textContent = `${state.dadAlertUnreadCount} new Dad message${
+        state.dadAlertUnreadCount === 1 ? "" : "s"
+      }: ${state.dadAlertText}`;
+    } else {
+      dadAlertBanner.hidden = true;
+    }
+
+    const alertUi = getAlertEnableUiState();
+    enableAlerts.textContent = alertUi.label;
+    enableAlerts.disabled = alertUi.disabled;
+
+    clearDadAlert.addEventListener("click", () => {
+      state.dadAlertUnreadCount = 0;
+      state.dadAlertText = "";
+      render();
+    });
+    enableAlerts.addEventListener("click", async () => {
+      await enablePushAlerts();
+      render();
+    });
+  }
+  if (dadTypingIndicator) {
+    dadTypingIndicator.hidden = !state.dadTyping;
+  }
 
   outboxStatus.textContent = outboxSummary();
   appRoot.appendChild(node);
@@ -730,6 +781,104 @@ function wireThreadMessageActions(threadEl) {
   threadEl.addEventListener("pointerup", clearLongPress);
   threadEl.addEventListener("pointercancel", clearLongPress);
   threadEl.addEventListener("pointerleave", clearLongPress);
+}
+
+function getAlertEnableUiState() {
+  if (typeof Notification === "undefined") {
+    return { label: "Alerts unsupported", disabled: true };
+  }
+  const permission = Notification.permission;
+  if (permission === "denied") {
+    return { label: "Alerts blocked", disabled: true };
+  }
+  if (permission !== "granted") {
+    return { label: "Enable alerts", disabled: false };
+  }
+  if (!swRegistration || !("PushManager" in window)) {
+    return { label: "Push unavailable", disabled: true };
+  }
+  if (state.pushSubscribed) {
+    return { label: "Alerts enabled", disabled: true };
+  }
+  return { label: "Enable alerts", disabled: false };
+}
+
+async function enablePushAlerts() {
+  if (typeof Notification === "undefined") return;
+  if (!("PushManager" in window)) {
+    alert("Push is not supported in this browser.");
+    return;
+  }
+  try {
+    if (Notification.permission === "default") {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") return;
+    }
+    if (Notification.permission !== "granted") return;
+    const registration = await ensureServiceWorkerRegistration();
+    if (!registration) {
+      alert("Service worker is unavailable. Cannot enable push alerts.");
+      return;
+    }
+    const vapidPublicKey = String(config.PUSH_VAPID_PUBLIC_KEY || "").trim();
+    if (!vapidPublicKey) {
+      alert("Missing PUSH_VAPID_PUBLIC_KEY in config.js");
+      return;
+    }
+    const existing = await registration.pushManager.getSubscription();
+    const subscription =
+      existing ||
+      (await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+      }));
+    await savePushSubscription(subscription);
+    state.pushSubscribed = true;
+  } catch (err) {
+    console.warn("Enable push alerts failed", err);
+    alert(`Enable alerts failed: ${String(err?.message || err)}`);
+  }
+}
+
+async function savePushSubscription(subscription) {
+  if (!supabase || !state.conversationId || !subscription) return;
+  const payload = subscription.toJSON();
+  const endpoint = payload.endpoint || "";
+  const p256dh = payload.keys?.p256dh || "";
+  const auth = payload.keys?.auth || "";
+  if (!endpoint || !p256dh || !auth) {
+    throw new Error("Push subscription is missing endpoint/keys.");
+  }
+  const platform = detectPushPlatform();
+  const userAgent = navigator.userAgent || "";
+  const { error } = await supabase.rpc("save_push_subscription", {
+    p_conversation_id: state.conversationId,
+    p_endpoint: endpoint,
+    p_p256dh: p256dh,
+    p_auth: auth,
+    p_user_agent: userAgent,
+    p_platform: platform,
+  });
+  if (error) throw new Error(error.message);
+}
+
+function detectPushPlatform() {
+  const ua = navigator.userAgent || "";
+  if (/iPhone|iPad|iPod/i.test(ua)) return "ios";
+  if (/Macintosh|Mac OS X/i.test(ua)) return "macos";
+  if (/Android/i.test(ua)) return "android";
+  return "web";
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
 }
 
 function dismissMessageContextMenu() {
@@ -1095,6 +1244,152 @@ function applyUiFontScale(panelEl, fontSize, fallback) {
   panelEl.style.fontSize = `${Number(fontSize || fallback || 16)}px`;
 }
 
+function emitDadTypingStatus(isTyping, force = false) {
+  if (!supabase || !state.session || !state.conversationId) return;
+  const isDadActor = state.profile?.role === "dad" || state.roleHint === "dad";
+  if (!isDadActor) return;
+  if (!force && isTyping === state.lastDadTypingValue && Date.now() - state.lastDadTypingEmitAt < 1500)
+    return;
+  state.lastDadTypingEmitAt = Date.now();
+  state.lastDadTypingValue = isTyping;
+  supabase
+    .from("activity_events")
+    .insert({
+      conversation_id: state.conversationId,
+      event_type: "dad_typing",
+      payload: { typing: Boolean(isTyping) },
+    })
+    .then(({ error }) => {
+      if (error) console.warn("dad_typing emit failed", error.message);
+    });
+}
+
+function primeDadMessageMarker() {
+  if (state.lastDadMessageAt && state.lastDadMessageId) return;
+  const latestDad = getLatestDadMessage(state.messages);
+  if (!latestDad) return;
+  state.lastDadMessageAt = latestDad.created_at || "";
+  state.lastDadMessageId = latestDad.id || "";
+  localStorage.setItem(DAD_LAST_MSG_AT_KEY, state.lastDadMessageAt);
+  localStorage.setItem(DAD_LAST_MSG_ID_KEY, state.lastDadMessageId);
+}
+
+function getLatestDadMessage(messages) {
+  if (!Array.isArray(messages) || !messages.length) return null;
+  let latest = null;
+  for (const msg of messages) {
+    if (msg.sender_role !== "dad") continue;
+    if (!latest) {
+      latest = msg;
+      continue;
+    }
+    const nextAt = msg.created_at || "";
+    const latestAt = latest.created_at || "";
+    if (nextAt > latestAt || (nextAt === latestAt && String(msg.id) > String(latest.id))) {
+      latest = msg;
+    }
+  }
+  return latest;
+}
+
+function hasNewDadMessageSinceMarker(msg) {
+  if (!msg) return false;
+  const currentAt = msg.created_at || "";
+  const currentId = String(msg.id || "");
+  const savedAt = state.lastDadMessageAt || "";
+  const savedId = String(state.lastDadMessageId || "");
+  if (!savedAt) return true;
+  return currentAt > savedAt || (currentAt === savedAt && currentId > savedId);
+}
+
+function handleDadInboundAlerts(beforeMessages, afterMessages) {
+  if (state.role !== "caregiver") return;
+  const latestBefore = getLatestDadMessage(beforeMessages);
+  const latestAfter = getLatestDadMessage(afterMessages);
+  if (!latestAfter) return;
+  if (latestBefore && latestBefore.id === latestAfter.id) return;
+  if (!hasNewDadMessageSinceMarker(latestAfter)) return;
+
+  state.lastDadMessageAt = latestAfter.created_at || "";
+  state.lastDadMessageId = latestAfter.id || "";
+  localStorage.setItem(DAD_LAST_MSG_AT_KEY, state.lastDadMessageAt);
+  localStorage.setItem(DAD_LAST_MSG_ID_KEY, state.lastDadMessageId);
+
+  const preview = truncate(latestAfter.content || "[Image message]", 120);
+  state.dadAlertUnreadCount += 1;
+  state.dadAlertText = preview;
+  playDadAlertSound();
+  showDadSystemNotification(preview);
+}
+
+async function loadDadTypingStatus() {
+  if (!supabase || !state.session || !state.conversationId || state.role !== "caregiver") return;
+  const { data, error } = await supabase
+    .from("activity_events")
+    .select("payload, created_at")
+    .eq("conversation_id", state.conversationId)
+    .eq("event_type", "dad_typing")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return;
+  if (!data) {
+    state.dadTyping = false;
+    return;
+  }
+  const isTyping = Boolean(data?.payload?.typing);
+  const ageMs = Date.now() - new Date(data.created_at).getTime();
+  state.dadTyping = isTyping && ageMs <= 8000;
+}
+
+function showDadSystemNotification(preview) {
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission !== "granted") return;
+  try {
+    new Notification("Dad sent a message", {
+      body: preview,
+      tag: "dad-inbound-alert",
+      renotify: true,
+      requireInteraction: true,
+    });
+  } catch (err) {
+    console.warn("System notification failed", err);
+  }
+}
+
+function playDadAlertSound() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const now = ctx.currentTime;
+    const beep = (time, freq, dur) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, time);
+      gain.gain.exponentialRampToValueAtTime(0.15, time + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(time);
+      osc.stop(time + dur + 0.02);
+    };
+    beep(now, 880, 0.18);
+    beep(now + 0.24, 1175, 0.2);
+    setTimeout(() => {
+      try {
+        ctx.close();
+      } catch {
+        // noop
+      }
+    }, 1000);
+  } catch {
+    // noop
+  }
+}
+
 async function loadMessages() {
   if (!state.conversationId && supabase && state.session) {
     await ensureConversation();
@@ -1336,7 +1631,9 @@ function startMessageRefreshLoop() {
   setInterval(async () => {
     if (!supabase || !state.session || state.authRequired || !state.conversationId) return;
     const beforeSig = appStateSignature();
-    await Promise.all([loadMessages(), loadRemoteSettings()]);
+    const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
+    await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
+    handleDadInboundAlerts(beforeMessages, state.messages);
     const afterSig = appStateSignature();
     if (beforeSig !== afterSig && !isUserEditingControl()) {
       render();
@@ -1388,22 +1685,30 @@ function isUserEditingControl() {
   return Boolean(active.closest("#app"));
 }
 
-function setupServiceWorker() {
+async function setupServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
-  // Dev stability: clear any prior SW/cache so auth JS is always current.
-  navigator.serviceWorker
-    .getRegistrations()
-    .then((regs) => Promise.all(regs.map((r) => r.unregister())))
-    .catch((err) => {
-      console.warn("Service worker unregister failed", err);
-    });
-  if ("caches" in window) {
-    caches
-      .keys()
-      .then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
-      .catch((err) => {
-        console.warn("Cache clear failed", err);
-      });
+  await ensureServiceWorkerRegistration();
+}
+
+async function ensureServiceWorkerRegistration() {
+  if (!("serviceWorker" in navigator)) return null;
+  if (swRegistration) {
+    if ("PushManager" in window && Notification.permission === "granted") {
+      const sub = await swRegistration.pushManager.getSubscription();
+      state.pushSubscribed = Boolean(sub);
+    }
+    return swRegistration;
+  }
+  try {
+    swRegistration = await navigator.serviceWorker.register("./sw.js");
+    if ("PushManager" in window && Notification.permission === "granted") {
+      const sub = await swRegistration.pushManager.getSubscription();
+      state.pushSubscribed = Boolean(sub);
+    }
+    return swRegistration;
+  } catch (err) {
+    console.warn("Service worker register failed", err);
+    return null;
   }
 }
 
@@ -1449,9 +1754,9 @@ function isThreadNearBottom(threadEl) {
 
 function dadUiSignature(ui) {
   if (!ui) return "none";
-  return `${ui.fontScale || 22}|${ui.theme || "high-contrast"}|${ui.bubbleWidth || 80}|${
-    ui.imageSize || "medium"
-  }`;
+  return `${ui.fontScale || 22}|${ui.uiFontScale || 16}|${ui.theme || "high-contrast"}|${
+    ui.bubbleWidth || 80
+  }|${ui.imageSize || "medium"}`;
 }
 
 function trustRulesSignature(rules) {
@@ -1466,6 +1771,8 @@ function appStateSignature() {
     messagesSignature(state.messages),
     dadUiSignature(state.appliedDadUI),
     trustRulesSignature(state.trustRules),
+    state.dadTyping ? "typing" : "idle",
+    String(state.dadAlertUnreadCount || 0),
   ].join("||");
 }
 

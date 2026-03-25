@@ -186,6 +186,30 @@ select:focus {
   font-size: 0.9rem;
 }
 
+.dad-alert-banner {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid #f59e0b;
+  border-radius: 10px;
+  background: #fef3c7;
+  color: #78350f;
+}
+
+.dad-alert-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.typing-indicator {
+  margin: 6px 0 8px;
+  font-size: 0.9rem;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
 .bubble.hidden-for-dad-muted {
   opacity: 0.6;
   background: #f3f4f6;

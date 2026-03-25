@@ -1,2 +1,4 @@
 config.js
 *.log
+supabase/.temp/
+supabase/.branches/
