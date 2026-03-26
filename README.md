@@ -65,6 +65,7 @@ This version is static and needs no npm install.
 - `scripts/deploy-push-notifications.sh` - push setup helper script
 - `serve.ps1` - simple local static server helper
 - `WAVE2-SITREP.md` - current status and proposed Wave 2 scope
+- `docs/WAVE2-EXECUTION-BOARD.md` - implementation board for Wave 2 milestones and ship gates
 - `docs/gstack/` - portable GSTACK planning/review snapshots + new-machine handoff guide
 - `supabase/schema.sql` - Wave 1 schema + policy scaffolding
 - `supabase/functions/delayed-auto-worker/index.ts` - delayed auto worker
