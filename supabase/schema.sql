@@ -64,12 +64,14 @@ create table if not exists dad_ui_profiles (
   theme text not null default 'high-contrast' check (theme in ('high-contrast', 'warm', 'dark')),
   bubble_width integer not null default 80 check (bubble_width between 60 and 95),
   image_default_size text not null default 'medium' check (image_default_size in ('small', 'medium', 'large')),
+  alerts_enabled boolean not null default true,
   role_lock_enabled boolean not null default false,
   draft_font_scale integer check (draft_font_scale between 12 and 34),
   draft_ui_font_scale integer check (draft_ui_font_scale between 12 and 24),
   draft_theme text check (draft_theme in ('high-contrast', 'warm', 'dark')),
   draft_bubble_width integer check (draft_bubble_width between 60 and 95),
   draft_image_default_size text check (draft_image_default_size in ('small', 'medium', 'large')),
+  draft_alerts_enabled boolean,
   draft_role_lock_enabled boolean,
   draft_updated_at timestamptz,
   updated_at timestamptz not null default now()
@@ -90,6 +92,10 @@ alter table dad_ui_profiles
   add column if not exists ui_font_scale integer not null default 16;
 alter table dad_ui_profiles
   add column if not exists draft_ui_font_scale integer;
+alter table dad_ui_profiles
+  add column if not exists alerts_enabled boolean not null default true;
+alter table dad_ui_profiles
+  add column if not exists draft_alerts_enabled boolean;
 alter table dad_ui_profiles
   drop constraint if exists dad_ui_profiles_ui_font_scale_check;
 alter table dad_ui_profiles
@@ -405,6 +411,7 @@ create or replace function save_dad_ui_draft(
   p_theme text,
   p_bubble_width integer,
   p_image_default_size text,
+  p_alerts_enabled boolean default true,
   p_role_lock_enabled boolean default false
 )
 returns dad_ui_profiles
@@ -425,6 +432,7 @@ begin
     draft_theme,
     draft_bubble_width,
     draft_image_default_size,
+    draft_alerts_enabled,
     draft_role_lock_enabled,
     draft_updated_at
   )
@@ -434,6 +442,7 @@ begin
     p_theme,
     p_bubble_width,
     p_image_default_size,
+    p_alerts_enabled,
     p_role_lock_enabled,
     now()
   )
@@ -442,6 +451,7 @@ begin
       draft_theme = excluded.draft_theme,
       draft_bubble_width = excluded.draft_bubble_width,
       draft_image_default_size = excluded.draft_image_default_size,
+      draft_alerts_enabled = excluded.draft_alerts_enabled,
       draft_role_lock_enabled = excluded.draft_role_lock_enabled,
       draft_updated_at = now()
   returning * into v_profile;
@@ -468,11 +478,13 @@ begin
       theme = coalesce(draft_theme, theme),
       bubble_width = coalesce(draft_bubble_width, bubble_width),
       image_default_size = coalesce(draft_image_default_size, image_default_size),
+      alerts_enabled = coalesce(draft_alerts_enabled, alerts_enabled),
       role_lock_enabled = coalesce(draft_role_lock_enabled, role_lock_enabled),
       draft_font_scale = null,
       draft_theme = null,
       draft_bubble_width = null,
       draft_image_default_size = null,
+      draft_alerts_enabled = null,
       draft_role_lock_enabled = null,
       draft_updated_at = null,
       updated_at = now()

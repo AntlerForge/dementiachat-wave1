@@ -20,6 +20,9 @@ const CAREGIVER_TAB_KEY = "carechat.caregiver_tab";
 const DAD_UI_DRAFT_KEY = "carechat.dad_ui_draft";
 const DAD_LAST_MSG_AT_KEY = "carechat.dad_last_msg_at";
 const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
+const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
+const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
+const DAD_ALERT_PROMPTED_KEY = "carechat.dad_alert_prompted";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -122,6 +125,7 @@ const state = {
     theme: "high-contrast",
     bubbleWidth: 80,
     imageSize: "medium",
+    alertsEnabled: true,
   }),
   caregiverUI: readJson(CAREGIVER_UI_KEY, {
     fontScale: 18,
@@ -149,6 +153,8 @@ const state = {
   dadAlertText: "",
   lastDadMessageAt: localStorage.getItem(DAD_LAST_MSG_AT_KEY) || "",
   lastDadMessageId: localStorage.getItem(DAD_LAST_MSG_ID_KEY) || "",
+  lastCaregiverMessageAt: localStorage.getItem(CAREGIVER_LAST_MSG_AT_KEY) || "",
+  lastCaregiverMessageId: localStorage.getItem(CAREGIVER_LAST_MSG_ID_KEY) || "",
   lastDadTypingEmitAt: 0,
   lastDadTypingValue: false,
   pushSubscribed: false,
@@ -184,7 +190,7 @@ async function init() {
     await bootstrapRemote();
     enforceRoleLock();
     await loadMessages();
-    primeDadMessageMarker();
+    primeInboundMessageMarkers();
     render();
   } catch (err) {
     showFatalStartupError(err);
@@ -368,6 +374,10 @@ async function loadRemoteSettings() {
       theme: uiData.theme,
       bubbleWidth: uiData.bubble_width,
       imageSize: uiData.image_default_size || "medium",
+      alertsEnabled:
+        uiData.alerts_enabled == null
+          ? state.appliedDadUI.alertsEnabled !== false
+          : Boolean(uiData.alerts_enabled),
     };
     state.roleLockEnabled = Boolean(uiData.role_lock_enabled);
     localStorage.setItem(DAD_UI_KEY, JSON.stringify(state.appliedDadUI));
@@ -647,6 +657,7 @@ function renderDadView() {
     visibleCount += 1;
     thread.appendChild(renderPendingBubble(pending));
   }
+  maybeRequestDadAlertPermission();
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1069,6 +1080,18 @@ function getAlertEnableUiState() {
   return { label: "Enable alerts", disabled: false };
 }
 
+function maybeRequestDadAlertPermission() {
+  if (state.role !== "dad") return;
+  if (state.appliedDadUI?.alertsEnabled === false) return;
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission !== "default") return;
+  if (localStorage.getItem(DAD_ALERT_PROMPTED_KEY) === "1") return;
+  localStorage.setItem(DAD_ALERT_PROMPTED_KEY, "1");
+  Notification.requestPermission().catch(() => {
+    // noop
+  });
+}
+
 async function enablePushAlerts() {
   if (typeof Notification === "undefined") return;
   if (!("PushManager" in window)) {
@@ -1245,11 +1268,21 @@ function wireDadUiPane(root) {
   const uiFontScale = root.getElementById("dadUiFontScale");
   const theme = root.getElementById("theme");
   const bubbleWidth = root.getElementById("bubbleWidth");
+  const dadAlertsEnabled = root.getElementById("dadAlertsEnabled");
   const previewBtn = root.getElementById("previewSettings");
   const applyBtn = root.getElementById("applySettings");
   const note = root.getElementById("previewNote");
   const previewThread = root.getElementById("dadUiPreviewThread");
-  if (!fontScale || !uiFontScale || !theme || !bubbleWidth || !previewBtn || !applyBtn || !note)
+  if (
+    !fontScale ||
+    !uiFontScale ||
+    !theme ||
+    !bubbleWidth ||
+    !dadAlertsEnabled ||
+    !previewBtn ||
+    !applyBtn ||
+    !note
+  )
     return;
 
   const currentDraft = state.previewDadUI || { ...state.appliedDadUI };
@@ -1257,6 +1290,7 @@ function wireDadUiPane(root) {
   uiFontScale.value = String(currentDraft.uiFontScale || 16);
   theme.value = currentDraft.theme;
   bubbleWidth.value = String(currentDraft.bubbleWidth);
+  dadAlertsEnabled.value = currentDraft.alertsEnabled === false ? "0" : "1";
 
   const saveDraftFromControls = () => {
     state.previewDadUI = {
@@ -1265,6 +1299,7 @@ function wireDadUiPane(root) {
       theme: theme.value,
       bubbleWidth: Number(bubbleWidth.value),
       imageSize: state.appliedDadUI.imageSize || "medium",
+      alertsEnabled: dadAlertsEnabled.value !== "0",
     };
     localStorage.setItem(DAD_UI_DRAFT_KEY, JSON.stringify(state.previewDadUI));
   };
@@ -1292,6 +1327,10 @@ function wireDadUiPane(root) {
   bubbleWidth.addEventListener("input", () => {
     saveDraftFromControls();
     updatePreview();
+    note.textContent = "Draft updated. Click 'Apply to Dad' when ready.";
+  });
+  dadAlertsEnabled.addEventListener("change", () => {
+    saveDraftFromControls();
     note.textContent = "Draft updated. Click 'Apply to Dad' when ready.";
   });
   previewBtn.addEventListener("click", () => {
@@ -1385,6 +1424,7 @@ async function saveDadUiDraftCompat() {
     p_bubble_width: state.previewDadUI.bubbleWidth,
     p_image_default_size: state.previewDadUI.imageSize || "medium",
     p_role_lock_enabled: state.roleLockEnabled,
+    p_alerts_enabled: state.previewDadUI.alertsEnabled !== false,
   };
   const v2 = await supabase.rpc("save_dad_ui_draft", payloadV2);
   if (!v2.error) return v2;
@@ -1578,21 +1618,32 @@ function emitDadTypingStatus(isTyping, force = false) {
     });
 }
 
-function primeDadMessageMarker() {
-  if (state.lastDadMessageAt && state.lastDadMessageId) return;
-  const latestDad = getLatestDadMessage(state.messages);
-  if (!latestDad) return;
-  state.lastDadMessageAt = latestDad.created_at || "";
-  state.lastDadMessageId = latestDad.id || "";
-  localStorage.setItem(DAD_LAST_MSG_AT_KEY, state.lastDadMessageAt);
-  localStorage.setItem(DAD_LAST_MSG_ID_KEY, state.lastDadMessageId);
+function primeInboundMessageMarkers() {
+  const latestDad = getLatestMessageByRole(state.messages, "dad");
+  if (!state.lastDadMessageAt || !state.lastDadMessageId) {
+    if (latestDad) {
+      state.lastDadMessageAt = latestDad.created_at || "";
+      state.lastDadMessageId = latestDad.id || "";
+      localStorage.setItem(DAD_LAST_MSG_AT_KEY, state.lastDadMessageAt);
+      localStorage.setItem(DAD_LAST_MSG_ID_KEY, state.lastDadMessageId);
+    }
+  }
+  const latestCaregiver = getLatestMessageByRole(state.messages, "caregiver");
+  if (!state.lastCaregiverMessageAt || !state.lastCaregiverMessageId) {
+    if (latestCaregiver) {
+      state.lastCaregiverMessageAt = latestCaregiver.created_at || "";
+      state.lastCaregiverMessageId = latestCaregiver.id || "";
+      localStorage.setItem(CAREGIVER_LAST_MSG_AT_KEY, state.lastCaregiverMessageAt);
+      localStorage.setItem(CAREGIVER_LAST_MSG_ID_KEY, state.lastCaregiverMessageId);
+    }
+  }
 }
 
-function getLatestDadMessage(messages) {
+function getLatestMessageByRole(messages, senderRole) {
   if (!Array.isArray(messages) || !messages.length) return null;
   let latest = null;
   for (const msg of messages) {
-    if (msg.sender_role !== "dad") continue;
+    if (msg.sender_role !== senderRole) continue;
     if (!latest) {
       latest = msg;
       continue;
@@ -1606,23 +1657,30 @@ function getLatestDadMessage(messages) {
   return latest;
 }
 
-function hasNewDadMessageSinceMarker(msg) {
+function hasNewMessageSinceMarker(msg, savedAt, savedId) {
   if (!msg) return false;
   const currentAt = msg.created_at || "";
   const currentId = String(msg.id || "");
-  const savedAt = state.lastDadMessageAt || "";
-  const savedId = String(state.lastDadMessageId || "");
   if (!savedAt) return true;
   return currentAt > savedAt || (currentAt === savedAt && currentId > savedId);
 }
 
-function handleDadInboundAlerts(beforeMessages, afterMessages) {
+function handleInboundAlerts(beforeMessages, afterMessages) {
+  if (state.role === "caregiver") {
+    handleCaregiverInboundAlerts(beforeMessages, afterMessages);
+  } else if (state.role === "dad") {
+    handleDadInboundFromCaregiver(beforeMessages, afterMessages);
+  }
+}
+
+function handleCaregiverInboundAlerts(beforeMessages, afterMessages) {
   if (state.role !== "caregiver") return;
-  const latestBefore = getLatestDadMessage(beforeMessages);
-  const latestAfter = getLatestDadMessage(afterMessages);
+  const latestBefore = getLatestMessageByRole(beforeMessages, "dad");
+  const latestAfter = getLatestMessageByRole(afterMessages, "dad");
   if (!latestAfter) return;
   if (latestBefore && latestBefore.id === latestAfter.id) return;
-  if (!hasNewDadMessageSinceMarker(latestAfter)) return;
+  if (!hasNewMessageSinceMarker(latestAfter, state.lastDadMessageAt, String(state.lastDadMessageId)))
+    return;
 
   state.lastDadMessageAt = latestAfter.created_at || "";
   state.lastDadMessageId = latestAfter.id || "";
@@ -1633,7 +1691,33 @@ function handleDadInboundAlerts(beforeMessages, afterMessages) {
   state.dadAlertUnreadCount += 1;
   state.dadAlertText = preview;
   playDadAlertSound();
-  showDadSystemNotification(preview);
+  showSystemNotification("Dad sent a message", preview, "dad-inbound-alert");
+}
+
+function handleDadInboundFromCaregiver(beforeMessages, afterMessages) {
+  if (state.role !== "dad") return;
+  if (state.appliedDadUI?.alertsEnabled === false) return;
+  const latestBefore = getLatestMessageByRole(beforeMessages, "caregiver");
+  const latestAfter = getLatestMessageByRole(afterMessages, "caregiver");
+  if (!latestAfter) return;
+  if (latestBefore && latestBefore.id === latestAfter.id) return;
+  if (
+    !hasNewMessageSinceMarker(
+      latestAfter,
+      state.lastCaregiverMessageAt,
+      String(state.lastCaregiverMessageId)
+    )
+  )
+    return;
+
+  state.lastCaregiverMessageAt = latestAfter.created_at || "";
+  state.lastCaregiverMessageId = latestAfter.id || "";
+  localStorage.setItem(CAREGIVER_LAST_MSG_AT_KEY, state.lastCaregiverMessageAt);
+  localStorage.setItem(CAREGIVER_LAST_MSG_ID_KEY, state.lastCaregiverMessageId);
+
+  const preview = truncate(latestAfter.content || "[Image message]", 120);
+  playDadAlertSound();
+  showSystemNotification("Tony sent a message", preview, "caregiver-inbound-alert");
 }
 
 async function loadDadTypingStatus() {
@@ -1656,13 +1740,13 @@ async function loadDadTypingStatus() {
   state.dadTyping = isTyping && ageMs <= 8000;
 }
 
-function showDadSystemNotification(preview) {
+function showSystemNotification(title, preview, tag) {
   if (typeof Notification === "undefined") return;
   if (Notification.permission !== "granted") return;
   try {
-    new Notification("Dad sent a message", {
+    new Notification(title, {
       body: preview,
-      tag: "dad-inbound-alert",
+      tag: tag || "carechat-inbound-alert",
       renotify: true,
       requireInteraction: true,
     });
@@ -2073,7 +2157,7 @@ function startMessageRefreshLoop() {
       const beforeSig = appStateSignature();
       const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
       await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
-      handleDadInboundAlerts(beforeMessages, state.messages);
+      handleInboundAlerts(beforeMessages, state.messages);
       const afterSig = appStateSignature();
       const messagesChanged =
         messagesSignature(beforeMessages) !== messagesSignature(state.messages);
@@ -2203,7 +2287,7 @@ function dadUiSignature(ui) {
   if (!ui) return "none";
   return `${ui.fontScale || 22}|${ui.uiFontScale || 16}|${ui.theme || "high-contrast"}|${
     ui.bubbleWidth || 80
-  }|${ui.imageSize || "medium"}`;
+  }|${ui.imageSize || "medium"}|${ui.alertsEnabled === false ? 0 : 1}`;
 }
 
 function trustRulesSignature(rules) {
