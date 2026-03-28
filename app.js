@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.3";
+const APP_VERSION = "wave1-2026-03-26.4";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -2549,7 +2549,7 @@ async function ensureServiceWorkerRegistration() {
     return swRegistration;
   }
   try {
-    swRegistration = await navigator.serviceWorker.register("./sw.js");
+    swRegistration = await navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" });
     if ("PushManager" in window && Notification.permission === "granted") {
       const sub = await swRegistration.pushManager.getSubscription();
       state.pushSubscribed = Boolean(sub);
@@ -2603,6 +2603,7 @@ function setupAppUpdatePolling() {
     await checkForUpdate();
   });
 
+  checkForUpdate();
   setInterval(checkForUpdate, APP_UPDATE_CHECK_MS);
 }
 
