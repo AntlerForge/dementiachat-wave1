@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.4";
+const APP_VERSION = "wave1-2026-03-26.5";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -62,6 +62,10 @@ const APP_UPDATE_CHECK_MS = Math.max(60_000, parseMsWithDefault(config.APP_UPDAT
 const APP_UPDATE_IDLE_RELOAD_MS = Math.max(
   15_000,
   parseMsWithDefault(config.APP_UPDATE_IDLE_RELOAD_MS, 60_000)
+);
+const RUNTIME_VERSION_CHECK_MS = Math.max(
+  10_000,
+  parseMsWithDefault(config.RUNTIME_VERSION_CHECK_MS, 30_000)
 );
 const PRESENCE_HEARTBEAT_MS = Math.max(10_000, parseMsWithDefault(config.PRESENCE_HEARTBEAT_MS, 20_000));
 const DAD_ONLINE_WINDOW_MS = Math.max(30_000, parseMsWithDefault(config.DAD_ONLINE_WINDOW_MS, 90_000));
@@ -192,6 +196,9 @@ const state = {
     caregiver: { version: APP_VERSION, seenAt: "" },
     dad: { version: "unknown", seenAt: "" },
   },
+  runtimeUpdateInProgress: false,
+  runtimeLatestSeenVersion: APP_VERSION,
+  lastRuntimeVersionCheckAt: 0,
   lastVersionEmitAt: 0,
   lastVersionFetchAt: 0,
   lastPresenceEmitAt: 0,
@@ -818,6 +825,10 @@ function renderDadView() {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (state.runtimeUpdateInProgress) {
+      alert("App update is applying. Please wait a few seconds.");
+      return;
+    }
     const text = input.value.trim();
     if (!text) return;
     input.value = "";
@@ -902,6 +913,10 @@ function renderCaregiverView() {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (state.runtimeUpdateInProgress) {
+      outboxStatus.textContent = "App update is applying. Please wait a few seconds.";
+      return;
+    }
     const text = input.value.trim();
     if (!text) return;
     input.value = "";
@@ -2582,6 +2597,123 @@ function activateWaitingServiceWorker(registration) {
   return true;
 }
 
+function showRuntimeUpdateNotice(text) {
+  let el = document.getElementById("runtimeUpdateNotice");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "runtimeUpdateNotice";
+    el.style.position = "fixed";
+    el.style.left = "12px";
+    el.style.right = "12px";
+    el.style.bottom = "12px";
+    el.style.zIndex = "10000";
+    el.style.padding = "10px 12px";
+    el.style.borderRadius = "10px";
+    el.style.border = "1px solid #1d4ed8";
+    el.style.background = "#dbeafe";
+    el.style.color = "#1e3a8a";
+    el.style.fontWeight = "600";
+    el.style.fontSize = "0.95rem";
+    el.style.boxShadow = "0 10px 28px rgba(15, 23, 42, 0.2)";
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+}
+
+function clearRuntimeUpdateNotice() {
+  const el = document.getElementById("runtimeUpdateNotice");
+  if (el) el.remove();
+}
+
+async function fetchLatestAppVersionManifest() {
+  const url = new URL("./version.json", window.location.href);
+  url.searchParams.set("t", String(Date.now()));
+  const response = await fetch(url.toString(), { cache: "no-store" });
+  if (!response.ok) throw new Error(`version fetch failed: ${response.status}`);
+  const payload = await response.json();
+  return String(payload?.version || "").trim();
+}
+
+async function waitForWaitingWorker(registration, timeoutMs = 10_000) {
+  if (!registration) return false;
+  if (registration.waiting) return activateWaitingServiceWorker(registration);
+  if (!registration.installing) return false;
+  const installing = registration.installing;
+  return await new Promise((resolve) => {
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        installing.removeEventListener("statechange", onStateChange);
+      } catch {
+        /* noop */
+      }
+      resolve(result);
+    };
+    const onStateChange = () => {
+      if (registration.waiting) {
+        finish(activateWaitingServiceWorker(registration));
+        return;
+      }
+      if (installing.state === "activated" || installing.state === "redundant") {
+        finish(false);
+      }
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    installing.addEventListener("statechange", onStateChange);
+    onStateChange();
+  });
+}
+
+function forceVersionedReload(targetVersion) {
+  const url = new URL(window.location.href);
+  if (targetVersion) url.searchParams.set("v", targetVersion);
+  else url.searchParams.set("v", String(Date.now()));
+  window.location.replace(url.toString());
+}
+
+async function applyRuntimeUpdate(targetVersion) {
+  if (state.runtimeUpdateInProgress) return;
+  state.runtimeUpdateInProgress = true;
+  showRuntimeUpdateNotice(`Updating app to ${targetVersion}...`);
+  persistOutbox();
+  if (state.role === "dad") emitDadTypingStatus(false, true);
+  try {
+    const registration = await ensureServiceWorkerRegistration();
+    if (registration) {
+      await registration.update();
+      if (activateWaitingServiceWorker(registration)) return;
+      if (await waitForWaitingWorker(registration)) return;
+    }
+    forceVersionedReload(targetVersion);
+  } catch (err) {
+    console.warn("Runtime update apply failed", err);
+    forceVersionedReload(targetVersion);
+  }
+}
+
+async function checkRuntimeVersionAndApply(force = false) {
+  if (!navigator.onLine || state.runtimeUpdateInProgress) return;
+  if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+  const now = Date.now();
+  if (!force && now - state.lastRuntimeVersionCheckAt < 5000) return;
+  state.lastRuntimeVersionCheckAt = now;
+  try {
+    const latestVersion = await fetchLatestAppVersionManifest();
+    if (!latestVersion) return;
+    state.runtimeLatestSeenVersion = latestVersion;
+    if (latestVersion !== APP_VERSION) {
+      await applyRuntimeUpdate(latestVersion);
+    } else {
+      clearRuntimeUpdateNotice();
+    }
+  } catch (err) {
+    console.warn("Runtime version check failed", err);
+  }
+}
+
 function setupAppUpdatePolling() {
   if (!("serviceWorker" in navigator)) return;
 
@@ -2596,15 +2728,25 @@ function setupAppUpdatePolling() {
     } catch (err) {
       console.warn("Update poll failed", err);
     }
+    await checkRuntimeVersionAndApply(false);
   };
 
   document.addEventListener("visibilitychange", async () => {
     if (document.visibilityState !== "visible") return;
     await checkForUpdate();
   });
+  window.addEventListener("focus", async () => {
+    await checkForUpdate();
+  });
+  window.addEventListener("online", async () => {
+    await checkForUpdate();
+  });
 
   checkForUpdate();
   setInterval(checkForUpdate, APP_UPDATE_CHECK_MS);
+  setInterval(() => {
+    checkRuntimeVersionAndApply(false);
+  }, RUNTIME_VERSION_CHECK_MS);
 }
 
 function outboxSummary() {

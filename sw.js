@@ -1,4 +1,4 @@
-const CACHE_NAME = "carechat-wave1-v8";
+const CACHE_NAME = "carechat-wave1-v9";
 const ASSETS = [
   "./",
   "./index.html",
@@ -52,6 +52,10 @@ self.addEventListener("fetch", (event) => {
   // Always hit network for the worker script so deploys can update; never serve stale sw.js from cache.
   if (url.pathname.endsWith("/sw.js")) {
     event.respondWith(fetch(event.request));
+    return;
+  }
+  if (url.pathname.endsWith("/version.json")) {
+    event.respondWith(fetch(event.request, { cache: "no-store" }));
     return;
   }
   if (isCriticalShellRequest(event.request)) {
