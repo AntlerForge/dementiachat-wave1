@@ -201,7 +201,10 @@ begin
   insert into profiles (id, role, display_name)
   values (auth.uid(), v_role, coalesce(p_display_name, ''))
   on conflict (id) do update
-    set role = excluded.role,
+    set role = case
+          when profiles.role in ('dad', 'caregiver') then profiles.role
+          else excluded.role
+        end,
         display_name = case
           when excluded.display_name = '' then profiles.display_name
           else excluded.display_name

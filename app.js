@@ -22,7 +22,8 @@ const DAD_LAST_MSG_AT_KEY = "carechat.dad_last_msg_at";
 const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
-const DAD_ALERT_PROMPTED_KEY = "carechat.dad_alert_prompted";
+const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
+const APP_VERSION = "wave1-2026-03-26.2";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -32,6 +33,11 @@ let activeMessageMenu = null;
 let activeMenuOutsideHandler = null;
 let activeMenuEscapeHandler = null;
 let swRegistration = null;
+let messagesChannel = null;
+let messagesChannelConversationId = null;
+let realtimeRefreshInFlight = false;
+let realtimeRefreshQueued = false;
+let dadAutoSnapTimer = null;
 
 const config = window.APP_CONFIG || {};
 
@@ -56,6 +62,10 @@ const APP_UPDATE_CHECK_MS = Math.max(60_000, parseMsWithDefault(config.APP_UPDAT
 const APP_UPDATE_IDLE_RELOAD_MS = Math.max(
   15_000,
   parseMsWithDefault(config.APP_UPDATE_IDLE_RELOAD_MS, 60_000)
+);
+const DAD_ALERT_PROMPT_RETRY_MS = Math.max(
+  10 * 60_000,
+  parseMsWithDefault(config.DAD_ALERT_PROMPT_RETRY_MS, 12 * 60 * 60_000)
 );
 const DAD_INACTIVE_AUTO_SCROLL_MS = Math.max(
   10_000,
@@ -170,8 +180,15 @@ const state = {
   outboxStorageWarned: false,
   outboxSyncInFlight: false,
   refreshInFlight: false,
-  dadLastInteractionAt: Date.now(),
+  dadLastScrollTop: 0,
+  dadLastScrollChangeAt: Date.now(),
   lastInteractionAt: Date.now(),
+  versionStatus: {
+    caregiver: { version: APP_VERSION, seenAt: "" },
+    dad: { version: "unknown", seenAt: "" },
+  },
+  lastVersionEmitAt: 0,
+  lastVersionFetchAt: 0,
 };
 
 init().catch((err) => {
@@ -280,12 +297,16 @@ async function bootstrapRemote() {
   if (!supabase) return;
   if (!state.session) {
     state.authRequired = true;
+    teardownMessagesRealtimeSubscription();
     return;
   }
   state.authRequired = false;
   await ensureProfile();
   await ensureConversation();
+  await syncMessagesRealtimeSubscription();
   await loadRemoteSettings();
+  await emitAppVersionHeartbeat(true);
+  await loadVersionStatus(true);
 }
 
 async function ensureProfile() {
@@ -419,6 +440,7 @@ function onRoleChange(event) {
 }
 
 function render() {
+  clearDadAutoSnapTimer();
   rememberThreadScrollIntent();
   dismissMessageContextMenu();
   enforceRoleLock();
@@ -436,10 +458,112 @@ function render() {
   }
 }
 
+function teardownMessagesRealtimeSubscription() {
+  if (!supabase || !messagesChannel) return;
+  try {
+    supabase.removeChannel(messagesChannel);
+  } catch (err) {
+    console.warn("Failed to remove realtime channel", err);
+  }
+  messagesChannel = null;
+  messagesChannelConversationId = null;
+}
+
+async function runRealtimeRefresh() {
+  if (realtimeRefreshInFlight) {
+    realtimeRefreshQueued = true;
+    return;
+  }
+  realtimeRefreshInFlight = true;
+  try {
+    const beforeSig = appStateSignature();
+    const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
+    await Promise.all([loadMessages(), loadRemoteSettings()]);
+    handleInboundAlerts(beforeMessages, state.messages);
+    const afterSig = appStateSignature();
+    if (beforeSig !== afterSig && !isUserEditingControl()) {
+      render();
+    }
+  } catch (err) {
+    console.warn("Realtime refresh failed", err);
+  } finally {
+    realtimeRefreshInFlight = false;
+    if (realtimeRefreshQueued) {
+      realtimeRefreshQueued = false;
+      queueMicrotask(() => {
+        runRealtimeRefresh().catch(() => {
+          // noop
+        });
+      });
+    }
+  }
+}
+
+async function syncMessagesRealtimeSubscription() {
+  if (!supabase || !state.session || !state.conversationId) {
+    teardownMessagesRealtimeSubscription();
+    return;
+  }
+  if (messagesChannel && messagesChannelConversationId === state.conversationId) return;
+  teardownMessagesRealtimeSubscription();
+
+  messagesChannelConversationId = state.conversationId;
+  messagesChannel = supabase
+    .channel(`messages-${state.conversationId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "messages",
+        filter: `conversation_id=eq.${state.conversationId}`,
+      },
+      () => {
+        runRealtimeRefresh().catch(() => {
+          // noop
+        });
+      }
+    )
+    .subscribe((status) => {
+      if (status === "CHANNEL_ERROR") {
+        console.warn("Realtime channel error; polling fallback remains active.");
+      }
+    });
+}
+
+function clearDadAutoSnapTimer() {
+  if (!dadAutoSnapTimer) return;
+  clearTimeout(dadAutoSnapTimer);
+  dadAutoSnapTimer = null;
+}
+
+function scheduleDadAutoSnap(threadEl) {
+  if (!threadEl || state.role !== "dad") return;
+  clearDadAutoSnapTimer();
+  if (isThreadNearBottom(threadEl)) return;
+  dadAutoSnapTimer = setTimeout(() => {
+    dadAutoSnapTimer = null;
+    if (state.role !== "dad") return;
+    const currentThread = document.getElementById("dadThread");
+    if (!currentThread) return;
+    if (!isThreadNearBottom(currentThread)) {
+      scrollThreadToBottom(currentThread);
+      state.dadStickToBottom = true;
+      state.dadLastScrollTop = Number(currentThread.scrollTop || 0);
+      state.dadLastScrollChangeAt = Date.now();
+    }
+  }, DAD_INACTIVE_AUTO_SCROLL_MS);
+}
+
 function rememberThreadScrollIntent() {
   const dadThread = document.getElementById("dadThread");
   if (dadThread) {
     state.dadStickToBottom = isThreadNearBottom(dadThread);
+    const nextTop = Number(dadThread.scrollTop || 0);
+    if (Math.abs(nextTop - Number(state.dadLastScrollTop || 0)) > 1) {
+      state.dadLastScrollTop = nextTop;
+      state.dadLastScrollChangeAt = Date.now();
+    }
   }
   const caregiverThread = document.getElementById("caregiverThread");
   if (caregiverThread) {
@@ -647,13 +771,7 @@ function renderDadView() {
   const form = node.getElementById("dadComposer");
   const input = node.getElementById("dadInput");
   input.value = state.dadDraft;
-  const markDadInteraction = () => {
-    state.dadLastInteractionAt = Date.now();
-  };
-  input.addEventListener("focus", markDadInteraction);
-  input.addEventListener("keydown", markDadInteraction);
   input.addEventListener("input", () => {
-    markDadInteraction();
     state.dadDraft = input.value;
     localStorage.setItem(DAD_DRAFT_KEY, state.dadDraft);
     emitDadTypingStatus(input.value.trim().length > 0);
@@ -676,9 +794,18 @@ function renderDadView() {
     visibleCount += 1;
     thread.appendChild(renderPendingBubble(pending));
   }
-  thread.addEventListener("scroll", markDadInteraction, { passive: true });
-  thread.addEventListener("pointerdown", markDadInteraction, { passive: true });
-  thread.addEventListener("touchstart", markDadInteraction, { passive: true });
+  thread.addEventListener(
+    "scroll",
+    () => {
+      const top = Number(thread.scrollTop || 0);
+      if (Math.abs(top - Number(state.dadLastScrollTop || 0)) > 1) {
+        state.dadLastScrollTop = top;
+        state.dadLastScrollChangeAt = Date.now();
+      }
+      scheduleDadAutoSnap(thread);
+    },
+    { passive: true }
+  );
   maybeRequestDadAlertPermission();
 
   form.addEventListener("submit", async (e) => {
@@ -702,11 +829,10 @@ function renderDadView() {
   });
 
   appRoot.appendChild(node);
-  const dadHasBeenInactive = Date.now() - state.dadLastInteractionAt >= DAD_INACTIVE_AUTO_SCROLL_MS;
-  const hasNewVisibleMessages = visibleCount > state.dadVisibleMessageCount;
-  if (state.dadStickToBottom || hasNewVisibleMessages || dadHasBeenInactive) {
+  if (state.dadStickToBottom) {
     scrollThreadToBottom(thread);
   }
+  scheduleDadAutoSnap(thread);
   state.dadVisibleMessageCount = visibleCount;
 }
 
@@ -1115,8 +1241,9 @@ function maybeRequestDadAlertPermission() {
   if (state.appliedDadUI?.alertsEnabled === false) return;
   if (typeof Notification === "undefined") return;
   if (Notification.permission !== "default") return;
-  if (localStorage.getItem(DAD_ALERT_PROMPTED_KEY) === "1") return;
-  localStorage.setItem(DAD_ALERT_PROMPTED_KEY, "1");
+  const lastPromptAt = Number(localStorage.getItem(DAD_ALERT_PROMPTED_AT_KEY) || 0);
+  if (Date.now() - lastPromptAt < DAD_ALERT_PROMPT_RETRY_MS) return;
+  localStorage.setItem(DAD_ALERT_PROMPTED_AT_KEY, String(Date.now()));
   Notification.requestPermission().catch(() => {
     // noop
   });
@@ -1426,6 +1553,9 @@ function wireCaregiverUiPane(root) {
   const bubbleWidth = root.getElementById("caregiverBubbleWidth");
   const applyBtn = root.getElementById("applyCaregiverUi");
   const status = root.getElementById("caregiverUiStatus");
+  const caregiverVersionInfo = root.getElementById("caregiverVersionInfo");
+  const dadVersionInfo = root.getElementById("dadVersionInfo");
+  const refreshVersionInfo = root.getElementById("refreshVersionInfo");
   if (!fontScale || !uiFontScale || !theme || !bubbleWidth || !applyBtn || !status) return;
 
   fontScale.value = String(state.caregiverUI.fontScale || 18);
@@ -1444,6 +1574,24 @@ function wireCaregiverUiPane(root) {
     status.textContent = "Applied to caregiver view.";
     render();
   });
+
+  if (caregiverVersionInfo) {
+    caregiverVersionInfo.textContent = `This caregiver app: ${APP_VERSION}`;
+  }
+  if (dadVersionInfo) {
+    const dadVersion = state.versionStatus?.dad?.version || "unknown";
+    const dadSeenAt = state.versionStatus?.dad?.seenAt
+      ? ` (last seen ${formatTime(state.versionStatus.dad.seenAt)})`
+      : "";
+    dadVersionInfo.textContent = `Dad app latest seen: ${dadVersion}${dadSeenAt}`;
+  }
+  if (refreshVersionInfo) {
+    refreshVersionInfo.addEventListener("click", async () => {
+      await emitAppVersionHeartbeat(true);
+      await loadVersionStatus(true);
+      render();
+    });
+  }
 }
 
 async function saveDadUiDraftCompat() {
@@ -2194,13 +2342,15 @@ function startOutboxSyncLoop() {
 function startMessageRefreshLoop() {
   const ms = Number(config.MESSAGE_POLL_MS || 2500);
   setInterval(async () => {
-    if (!supabase || !state.session || state.authRequired || !state.conversationId) return;
+    if (!supabase || !state.session || state.authRequired) return;
     if (state.refreshInFlight) return;
     state.refreshInFlight = true;
     try {
       const beforeSig = appStateSignature();
       const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
       await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
+      await emitAppVersionHeartbeat(false);
+      await loadVersionStatus(false);
       handleInboundAlerts(beforeMessages, state.messages);
       const afterSig = appStateSignature();
       const messagesChanged =
@@ -2214,6 +2364,62 @@ function startMessageRefreshLoop() {
       state.refreshInFlight = false;
     }
   }, ms);
+}
+
+async function emitAppVersionHeartbeat(force = false) {
+  if (!supabase || !state.session || !state.conversationId) return;
+  const now = Date.now();
+  if (!force && now - state.lastVersionEmitAt < 5 * 60_000) return;
+  state.lastVersionEmitAt = now;
+  const role = state.profile?.role || state.roleHint || state.role || "unknown";
+  try {
+    await supabase.from("activity_events").insert({
+      conversation_id: state.conversationId,
+      event_type: "app_version",
+      payload: { version: APP_VERSION, role, platform: detectPushPlatform() },
+    });
+  } catch (err) {
+    console.warn("app_version heartbeat failed", err);
+  }
+}
+
+async function loadVersionStatus(force = false) {
+  if (!supabase || !state.session || !state.conversationId || state.role !== "caregiver") return;
+  const now = Date.now();
+  if (!force && now - state.lastVersionFetchAt < 30_000) return;
+  state.lastVersionFetchAt = now;
+  try {
+    const { data, error } = await supabase
+      .from("activity_events")
+      .select("payload, created_at")
+      .eq("conversation_id", state.conversationId)
+      .eq("event_type", "app_version")
+      .order("created_at", { ascending: false })
+      .limit(100);
+    if (error || !data) return;
+
+    let latestCaregiver = null;
+    let latestDad = null;
+    for (const row of data) {
+      const role = String(row?.payload?.role || "").toLowerCase();
+      if (!latestCaregiver && role === "caregiver") latestCaregiver = row;
+      if (!latestDad && role === "dad") latestDad = row;
+      if (latestCaregiver && latestDad) break;
+    }
+
+    state.versionStatus = {
+      caregiver: {
+        version: String(latestCaregiver?.payload?.version || APP_VERSION),
+        seenAt: String(latestCaregiver?.created_at || ""),
+      },
+      dad: {
+        version: String(latestDad?.payload?.version || "unknown"),
+        seenAt: String(latestDad?.created_at || ""),
+      },
+    };
+  } catch (err) {
+    console.warn("loadVersionStatus failed", err);
+  }
 }
 
 function isDadRoleLocked() {
