@@ -52,6 +52,15 @@ const SUPABASE_FETCH_TIMEOUT_MS = Math.min(
   300_000,
   Math.max(45_000, parseMsWithDefault(config.SUPABASE_FETCH_TIMEOUT_MS, 180_000))
 );
+const APP_UPDATE_CHECK_MS = Math.max(60_000, parseMsWithDefault(config.APP_UPDATE_CHECK_MS, 300_000));
+const APP_UPDATE_IDLE_RELOAD_MS = Math.max(
+  15_000,
+  parseMsWithDefault(config.APP_UPDATE_IDLE_RELOAD_MS, 60_000)
+);
+const DAD_INACTIVE_AUTO_SCROLL_MS = Math.max(
+  10_000,
+  parseMsWithDefault(config.DAD_INACTIVE_AUTO_SCROLL_MS, 60_000)
+);
 const IMAGE_STORAGE_BUCKET = String(config.IMAGE_STORAGE_BUCKET || "chat-images").trim();
 const USE_STORAGE_FOR_IMAGES = config.USE_STORAGE_FOR_IMAGES !== false;
 
@@ -161,6 +170,8 @@ const state = {
   outboxStorageWarned: false,
   outboxSyncInFlight: false,
   refreshInFlight: false,
+  dadLastInteractionAt: Date.now(),
+  lastInteractionAt: Date.now(),
 };
 
 init().catch((err) => {
@@ -169,6 +180,7 @@ init().catch((err) => {
 });
 
 async function init() {
+  bindGlobalInteractionTracking();
   roleSelect.value = state.role;
   roleSelect.addEventListener("change", onRoleChange);
   if (supabase) {
@@ -199,6 +211,7 @@ async function init() {
   startOutboxSyncLoop();
   startMessageRefreshLoop();
   await setupServiceWorker();
+  setupAppUpdatePolling();
   render();
 }
 
@@ -634,7 +647,13 @@ function renderDadView() {
   const form = node.getElementById("dadComposer");
   const input = node.getElementById("dadInput");
   input.value = state.dadDraft;
+  const markDadInteraction = () => {
+    state.dadLastInteractionAt = Date.now();
+  };
+  input.addEventListener("focus", markDadInteraction);
+  input.addEventListener("keydown", markDadInteraction);
   input.addEventListener("input", () => {
+    markDadInteraction();
     state.dadDraft = input.value;
     localStorage.setItem(DAD_DRAFT_KEY, state.dadDraft);
     emitDadTypingStatus(input.value.trim().length > 0);
@@ -657,27 +676,35 @@ function renderDadView() {
     visibleCount += 1;
     thread.appendChild(renderPendingBubble(pending));
   }
+  thread.addEventListener("scroll", markDadInteraction, { passive: true });
+  thread.addEventListener("pointerdown", markDadInteraction, { passive: true });
+  thread.addEventListener("touchstart", markDadInteraction, { passive: true });
   maybeRequestDadAlertPermission();
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
+    input.value = "";
+    state.dadDraft = "";
+    localStorage.setItem(DAD_DRAFT_KEY, "");
     try {
       await queueMessage(text, "dad");
-      input.value = "";
-      state.dadDraft = "";
-      localStorage.setItem(DAD_DRAFT_KEY, "");
       emitDadTypingStatus(false, true);
       await loadMessages();
       render();
     } catch (err) {
+      state.dadDraft = text;
+      localStorage.setItem(DAD_DRAFT_KEY, state.dadDraft);
+      input.value = text;
       alert(`Send failed: ${String(err?.message || err)}`);
     }
   });
 
   appRoot.appendChild(node);
-  if (state.dadStickToBottom || visibleCount > state.dadVisibleMessageCount) {
+  const dadHasBeenInactive = Date.now() - state.dadLastInteractionAt >= DAD_INACTIVE_AUTO_SCROLL_MS;
+  const hasNewVisibleMessages = visibleCount > state.dadVisibleMessageCount;
+  if (state.dadStickToBottom || hasNewVisibleMessages || dadHasBeenInactive) {
     scrollThreadToBottom(thread);
   }
   state.dadVisibleMessageCount = visibleCount;
@@ -742,14 +769,17 @@ function renderCaregiverView() {
     e.preventDefault();
     const text = input.value.trim();
     if (!text) return;
+    input.value = "";
+    state.caregiverDraft = "";
+    localStorage.setItem(CAREGIVER_DRAFT_KEY, "");
     try {
       await queueMessage(text, "caregiver");
-      input.value = "";
-      state.caregiverDraft = "";
-      localStorage.setItem(CAREGIVER_DRAFT_KEY, "");
       await loadMessages();
       render();
     } catch (err) {
+      state.caregiverDraft = text;
+      localStorage.setItem(CAREGIVER_DRAFT_KEY, state.caregiverDraft);
+      input.value = text;
       outboxStatus.textContent = `Send failed: ${String(err?.message || err)}`;
     }
   });
@@ -1853,7 +1883,13 @@ function mergeServerMessageIntoState(row) {
 
 async function queueMessage(content, senderRole) {
   if (supabase && state.session) {
-    await ensureConversation();
+    try {
+      await ensureConversation();
+    } catch (err) {
+      // Do not block send on transient re-join failure if we already have a conversation id.
+      if (!state.conversationId) throw err;
+      console.warn("ensureConversation failed during queueMessage; using existing conversation id.", err);
+    }
   }
   const message = {
     id: crypto.randomUUID(),
@@ -1874,7 +1910,15 @@ async function queueMessage(content, senderRole) {
 
 async function queueImageMessage(imageUrl, senderRole, imageSize) {
   if (supabase && state.session) {
-    await ensureConversation();
+    try {
+      await ensureConversation();
+    } catch (err) {
+      if (!state.conversationId) throw err;
+      console.warn(
+        "ensureConversation failed during queueImageMessage; using existing conversation id.",
+        err
+      );
+    }
   }
   let finalImageUrl = imageUrl;
   if (supabase && state.session && USE_STORAGE_FOR_IMAGES && state.conversationId) {
@@ -2219,6 +2263,10 @@ function isUserEditingControl() {
 async function setupServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   await ensureServiceWorkerRegistration();
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    // New service worker took control; refresh to pick latest app shell/module.
+    window.location.reload();
+  });
 }
 
 async function ensureServiceWorkerRegistration() {
@@ -2241,6 +2289,51 @@ async function ensureServiceWorkerRegistration() {
     console.warn("Service worker register failed", err);
     return null;
   }
+}
+
+function bindGlobalInteractionTracking() {
+  const mark = () => {
+    state.lastInteractionAt = Date.now();
+  };
+  window.addEventListener("pointerdown", mark, { passive: true });
+  window.addEventListener("touchstart", mark, { passive: true });
+  window.addEventListener("keydown", mark, { passive: true });
+  window.addEventListener("scroll", mark, { passive: true });
+}
+
+function shouldApplyUpdateNow() {
+  const idleMs = Date.now() - state.lastInteractionAt;
+  return document.visibilityState === "hidden" || idleMs >= APP_UPDATE_IDLE_RELOAD_MS;
+}
+
+function activateWaitingServiceWorker(registration) {
+  if (!registration?.waiting) return false;
+  registration.waiting.postMessage({ type: "SKIP_WAITING" });
+  return true;
+}
+
+function setupAppUpdatePolling() {
+  if (!("serviceWorker" in navigator)) return;
+
+  const checkForUpdate = async () => {
+    try {
+      const reg = await ensureServiceWorkerRegistration();
+      if (!reg) return;
+      await reg.update();
+      if (reg.waiting && shouldApplyUpdateNow()) {
+        activateWaitingServiceWorker(reg);
+      }
+    } catch (err) {
+      console.warn("Update poll failed", err);
+    }
+  };
+
+  document.addEventListener("visibilitychange", async () => {
+    if (document.visibilityState !== "visible") return;
+    await checkForUpdate();
+  });
+
+  setInterval(checkForUpdate, APP_UPDATE_CHECK_MS);
 }
 
 function outboxSummary() {
