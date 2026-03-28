@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.2";
+const APP_VERSION = "wave1-2026-03-26.3";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -63,6 +63,8 @@ const APP_UPDATE_IDLE_RELOAD_MS = Math.max(
   15_000,
   parseMsWithDefault(config.APP_UPDATE_IDLE_RELOAD_MS, 60_000)
 );
+const PRESENCE_HEARTBEAT_MS = Math.max(10_000, parseMsWithDefault(config.PRESENCE_HEARTBEAT_MS, 20_000));
+const DAD_ONLINE_WINDOW_MS = Math.max(30_000, parseMsWithDefault(config.DAD_ONLINE_WINDOW_MS, 90_000));
 const DAD_ALERT_PROMPT_RETRY_MS = Math.max(
   10 * 60_000,
   parseMsWithDefault(config.DAD_ALERT_PROMPT_RETRY_MS, 12 * 60 * 60_000)
@@ -168,6 +170,9 @@ const state = {
   dadStickToBottom: true,
   caregiverStickToBottom: true,
   dadTyping: false,
+  dadOnline: false,
+  dadLastPresenceAt: "",
+  lastDadPresenceFetchAt: 0,
   dadAlertUnreadCount: 0,
   dadAlertText: "",
   lastDadMessageAt: localStorage.getItem(DAD_LAST_MSG_AT_KEY) || "",
@@ -189,6 +194,7 @@ const state = {
   },
   lastVersionEmitAt: 0,
   lastVersionFetchAt: 0,
+  lastPresenceEmitAt: 0,
 };
 
 init().catch((err) => {
@@ -305,6 +311,8 @@ async function bootstrapRemote() {
   await ensureConversation();
   await syncMessagesRealtimeSubscription();
   await loadRemoteSettings();
+  await emitPresenceHeartbeat(true);
+  await loadDadOnlineStatus(true);
   await emitAppVersionHeartbeat(true);
   await loadVersionStatus(true);
 }
@@ -851,12 +859,13 @@ function renderCaregiverView() {
 
   const tabs = node.getElementById("tabs");
   const outboxStatus = node.getElementById("outboxStatus");
-  const purgeInlineImagesBtn = node.getElementById("purgeInlineImages");
   const dadAlertBanner = node.getElementById("dadAlertBanner");
   const dadAlertText = node.getElementById("dadAlertText");
   const clearDadAlert = node.getElementById("clearDadAlert");
   const enableAlerts = node.getElementById("enableAlerts");
   const dadTypingIndicator = node.getElementById("dadTypingIndicator");
+  const dadOnlineDot = node.getElementById("dadOnlineDot");
+  const dadOnlineText = node.getElementById("dadOnlineText");
   applyUiFontScale(panel, state.caregiverUI.uiFontScale, 16);
   applyCaregiverUiTokens(thread, state.caregiverUI);
 
@@ -945,21 +954,11 @@ function renderCaregiverView() {
   if (dadTypingIndicator) {
     dadTypingIndicator.hidden = !state.dadTyping;
   }
-  if (purgeInlineImagesBtn) {
-    purgeInlineImagesBtn.addEventListener("click", async () => {
-      const ok = confirm(
-        "Purge heavy inline image payloads in this conversation? This keeps text but removes embedded photos."
-      );
-      if (!ok) return;
-      try {
-        const removed = await purgeInlineImagesForConversation();
-        outboxStatus.textContent = `Purged ${removed} inline image message${removed === 1 ? "" : "s"}.`;
-        await loadMessages();
-        render();
-      } catch (err) {
-        outboxStatus.textContent = `Purge failed: ${String(err?.message || err)}`;
-      }
-    });
+  if (dadOnlineDot && dadOnlineText) {
+    dadOnlineDot.classList.toggle("online", state.dadOnline);
+    dadOnlineDot.classList.toggle("offline", !state.dadOnline);
+    const lastSeen = state.dadLastPresenceAt ? ` (last seen ${formatTime(state.dadLastPresenceAt)})` : "";
+    dadOnlineText.textContent = state.dadOnline ? "Dad: online" : `Dad: offline${lastSeen}`;
   }
 
   outboxStatus.textContent = outboxSummary();
@@ -1080,6 +1079,7 @@ function wireCaregiverPullRefresh(threadEl, statusEl) {
 
 function wireImageSize(root) {
   const picker = root.getElementById("imageSize");
+  if (!picker) return;
   picker.value = state.appliedDadUI.imageSize || "medium";
   picker.addEventListener("change", () => {
     state.appliedDadUI.imageSize = picker.value;
@@ -1087,23 +1087,39 @@ function wireImageSize(root) {
 }
 
 function wireCaregiverImage(root) {
+  const toggleBtn = root.getElementById("openPhotoPicker");
+  const panel = root.getElementById("caregiverPhotoPanel");
   const fileInput = root.getElementById("caregiverImageFile");
   const preview = root.getElementById("caregiverImagePreview");
   const sendBtn = root.getElementById("sendCaregiverImage");
   const clearBtn = root.getElementById("clearCaregiverImage");
   const status = root.getElementById("imageStatus");
+  if (!fileInput || !preview || !sendBtn || !clearBtn || !status || !panel || !toggleBtn) return;
+
+  const setPanelOpen = (open) => {
+    panel.hidden = !open;
+    toggleBtn.textContent = open ? "x" : "+";
+    toggleBtn.setAttribute("aria-label", open ? "Close photo controls" : "Add photo");
+    if (open) status.textContent = status.textContent || "Select a photo to send.";
+    else if (!state.caregiverImageDraft?.dataUrl) status.textContent = "";
+  };
 
   const renderPreview = () => {
     if (state.caregiverImageDraft?.dataUrl) {
       preview.src = state.caregiverImageDraft.dataUrl;
       preview.style.display = "block";
       status.textContent = `Selected: ${state.caregiverImageDraft.name}`;
+      setPanelOpen(true);
       return;
     }
     preview.removeAttribute("src");
     preview.style.display = "none";
-    status.textContent = "";
+    if (!panel.hidden) status.textContent = "Select a photo to send.";
   };
+
+  toggleBtn.addEventListener("click", () => {
+    setPanelOpen(panel.hidden);
+  });
 
   fileInput.addEventListener("change", async () => {
     const file = fileInput.files?.[0];
@@ -1132,6 +1148,7 @@ function wireCaregiverImage(root) {
     state.caregiverImageDraft = null;
     fileInput.value = "";
     renderPreview();
+    setPanelOpen(false);
   });
 
   sendBtn.addEventListener("click", async () => {
@@ -1154,6 +1171,7 @@ function wireCaregiverImage(root) {
     }
   });
 
+  setPanelOpen(Boolean(state.caregiverImageDraft?.dataUrl));
   renderPreview();
 }
 
@@ -1796,6 +1814,24 @@ function emitDadTypingStatus(isTyping, force = false) {
     });
 }
 
+async function emitPresenceHeartbeat(force = false) {
+  if (!supabase || !state.session || !state.conversationId) return;
+  const now = Date.now();
+  if (!force && now - state.lastPresenceEmitAt < PRESENCE_HEARTBEAT_MS) return;
+  state.lastPresenceEmitAt = now;
+  const role = String(state.profile?.role || state.roleHint || state.role || "").toLowerCase();
+  if (!role || role === "unknown") return;
+  try {
+    await supabase.from("activity_events").insert({
+      conversation_id: state.conversationId,
+      event_type: "presence_ping",
+      payload: { role, version: APP_VERSION },
+    });
+  } catch (err) {
+    console.warn("presence heartbeat failed", err);
+  }
+}
+
 function primeInboundMessageMarkers() {
   const latestDad = getLatestMessageByRole(state.messages, "dad");
   if (!state.lastDadMessageAt || !state.lastDadMessageId) {
@@ -1916,6 +1952,33 @@ async function loadDadTypingStatus() {
   const isTyping = Boolean(data?.payload?.typing);
   const ageMs = Date.now() - new Date(data.created_at).getTime();
   state.dadTyping = isTyping && ageMs <= 8000;
+}
+
+async function loadDadOnlineStatus(force = false) {
+  if (!supabase || !state.session || !state.conversationId || state.role !== "caregiver") return;
+  const now = Date.now();
+  if (!force && now - state.lastDadPresenceFetchAt < 10_000) return;
+  state.lastDadPresenceFetchAt = now;
+  try {
+    const { data, error } = await supabase
+      .from("activity_events")
+      .select("created_at")
+      .eq("conversation_id", state.conversationId)
+      .eq("event_type", "presence_ping")
+      .eq("payload->>role", "dad")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error || !data?.created_at) {
+      state.dadOnline = false;
+      return;
+    }
+    state.dadLastPresenceAt = String(data.created_at || "");
+    const ageMs = Date.now() - new Date(state.dadLastPresenceAt).getTime();
+    state.dadOnline = Number.isFinite(ageMs) && ageMs <= DAD_ONLINE_WINDOW_MS;
+  } catch {
+    state.dadOnline = false;
+  }
 }
 
 function showSystemNotification(title, preview, tag) {
@@ -2348,7 +2411,8 @@ function startMessageRefreshLoop() {
     try {
       const beforeSig = appStateSignature();
       const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
-      await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
+      await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus(), loadDadOnlineStatus()]);
+      await emitPresenceHeartbeat(false);
       await emitAppVersionHeartbeat(false);
       await loadVersionStatus(false);
       handleInboundAlerts(beforeMessages, state.messages);
@@ -2602,6 +2666,7 @@ function appStateSignature() {
     dadUiSignature(state.appliedDadUI),
     trustRulesSignature(state.trustRules),
     state.dadTyping ? "typing" : "idle",
+    state.dadOnline ? "dad-online" : "dad-offline",
     String(state.dadAlertUnreadCount || 0),
   ].join("||");
 }
@@ -2763,18 +2828,6 @@ async function uploadImageForMessage(dataUrl, conversationId) {
   const publicUrl = data?.publicUrl || "";
   if (!publicUrl) throw new Error("Could not resolve uploaded image URL.");
   return publicUrl;
-}
-
-async function purgeInlineImagesForConversation() {
-  if (!supabase || !state.conversationId) {
-    throw new Error("Cloud mode and a conversation are required.");
-  }
-  const { data, error } = await supabase.rpc("caregiver_purge_inline_images", {
-    p_conversation_id: state.conversationId,
-    p_placeholder_text: "[Image removed to stabilize chat]",
-  });
-  if (error) throw new Error(error.message);
-  return Number(data || 0);
 }
 
 function readFileAsDataUrl(file) {

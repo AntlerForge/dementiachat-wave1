@@ -28,4 +28,7 @@ window.APP_CONFIG = {
   // App update polling via service worker (defaults: 5 min check, 60s idle auto-apply).
   // APP_UPDATE_CHECK_MS: 300000,
   // APP_UPDATE_IDLE_RELOAD_MS: 60000,
+  // Dad presence status in caregiver header (defaults: 20s heartbeat, 90s online window).
+  // PRESENCE_HEARTBEAT_MS: 20000,
+  // DAD_ONLINE_WINDOW_MS: 90000,
 };

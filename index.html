@@ -35,7 +35,14 @@
 
     <template id="caregiver-view-template">
       <section class="panel">
-        <h2>Caregiver View</h2>
+        <div class="caregiver-header">
+          <h2>Caregiver View</h2>
+          <div class="presence-group">
+            <span id="dadOnlineDot" class="presence-dot" title="Dad connection status"></span>
+            <span id="dadOnlineText" class="presence-text">Dad: checking...</span>
+            <span id="dadTypingIndicator" class="typing-indicator" hidden>Dad is typing...</span>
+          </div>
+        </div>
         <nav class="tabs" id="tabs">
           <button data-tab="chat" class="active">Chat</button>
           <button data-tab="dad-ui">UI Controls</button>
@@ -43,42 +50,34 @@
         </nav>
 
         <section data-pane="chat" class="pane active">
-          <div id="dadAlertBanner" class="dad-alert-banner" hidden>
-            <div id="dadAlertText"></div>
-            <div class="dad-alert-actions">
-              <button id="enableAlerts" type="button">Enable alerts</button>
-              <button id="clearDadAlert" type="button">Clear alert</button>
-            </div>
-          </div>
-          <p id="dadTypingIndicator" class="typing-indicator" hidden>Dad is typing...</p>
           <div id="caregiverThread" class="thread"></div>
-          <form id="caregiverComposer" class="composer">
+          <form id="caregiverComposer" class="composer caregiver-composer">
+            <button id="openPhotoPicker" type="button" class="composer-plus" aria-label="Add photo">+</button>
             <input id="caregiverInput" autocomplete="off" placeholder="Reply to Dad..." />
             <button type="submit">Send</button>
           </form>
-          <div class="row">
-            <label for="caregiverImageFile">Photo to send</label>
+          <div id="caregiverPhotoPanel" class="row photo-panel" hidden>
+            <label for="caregiverImageFile">Photo</label>
             <input id="caregiverImageFile" type="file" accept="image/*" />
             <div class="row image-actions">
               <button id="sendCaregiverImage" type="button">Send Photo</button>
               <button id="clearCaregiverImage" type="button">Clear</button>
             </div>
-            <img id="caregiverImagePreview" class="image-preview" alt="Selected photo preview" />
-            <p id="imageStatus" class="status"></p>
-          </div>
-          <div class="row">
             <label>Image size</label>
             <select id="imageSize">
               <option value="small">Small</option>
               <option value="medium" selected>Medium</option>
               <option value="large">Large</option>
             </select>
+            <img id="caregiverImagePreview" class="image-preview" alt="Selected photo preview" />
+            <p id="imageStatus" class="status"></p>
           </div>
-          <div class="row image-maintenance">
-            <button id="purgeInlineImages" type="button">Purge old inline images</button>
-            <p class="subtext">
-              If chat became slow/unstable due to historic embedded photos, this removes those heavy image payloads.
-            </p>
+          <div id="dadAlertBanner" class="dad-alert-banner" hidden>
+            <div id="dadAlertText"></div>
+            <div class="dad-alert-actions">
+              <button id="enableAlerts" type="button">Enable alerts</button>
+              <button id="clearDadAlert" type="button">Clear alert</button>
+            </div>
           </div>
           <div id="outboxStatus" class="status"></div>
         </section>
