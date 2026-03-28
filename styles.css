@@ -182,12 +182,30 @@ body {
   color: #1e3a8a;
 }
 
-.photo-panel {
+.photo-tray {
   margin-top: 8px;
   padding: 10px;
-  border: 1px dashed var(--line);
+  border: 1px solid #93c5fd;
+  border-radius: 12px;
+  background: #eff6ff;
+  display: grid;
+  gap: 8px;
+}
+
+.photo-tray-controls {
+  display: grid;
+  grid-template-columns: 1fr 110px 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.photo-tray-preview {
+  display: none;
+  width: 110px;
+  height: 110px;
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: #f8fafc;
+  object-fit: cover;
 }
 
 input,
@@ -352,23 +370,10 @@ select:focus {
   max-height: 180px;
 }
 
-.image-actions {
-  grid-template-columns: 1fr 1fr;
-}
-
 .row input[type="file"] {
   width: 100%;
   max-width: 100%;
   min-width: 0;
-}
-
-.image-preview {
-  display: none;
-  max-width: 260px;
-  max-height: 200px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  object-fit: cover;
 }
 
 .bubble-image {
@@ -415,7 +420,7 @@ select:focus {
     flex: 1;
   }
 
-  .image-actions {
-    grid-template-columns: 1fr;
+  .photo-tray-controls {
+    grid-template-columns: 1fr 1fr;
   }
 }

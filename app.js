@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.5";
+const APP_VERSION = "wave1-2026-03-26.6";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -1103,42 +1103,67 @@ function wireImageSize(root) {
 
 function wireCaregiverImage(root) {
   const toggleBtn = root.getElementById("openPhotoPicker");
-  const panel = root.getElementById("caregiverPhotoPanel");
+  const tray = root.getElementById("caregiverPhotoTray");
+  const chooseBtn = root.getElementById("chooseCaregiverImage");
   const fileInput = root.getElementById("caregiverImageFile");
   const preview = root.getElementById("caregiverImagePreview");
   const sendBtn = root.getElementById("sendCaregiverImage");
   const clearBtn = root.getElementById("clearCaregiverImage");
   const status = root.getElementById("imageStatus");
-  if (!fileInput || !preview || !sendBtn || !clearBtn || !status || !panel || !toggleBtn) return;
+  if (!fileInput || !preview || !sendBtn || !clearBtn || !status || !tray || !toggleBtn || !chooseBtn) return;
 
-  const setPanelOpen = (open) => {
-    panel.hidden = !open;
-    toggleBtn.textContent = open ? "x" : "+";
-    toggleBtn.setAttribute("aria-label", open ? "Close photo controls" : "Add photo");
-    if (open) status.textContent = status.textContent || "Select a photo to send.";
-    else if (!state.caregiverImageDraft?.dataUrl) status.textContent = "";
+  const clearDraft = () => {
+    state.caregiverImageDraft = null;
+    fileInput.value = "";
   };
 
-  const renderPreview = () => {
+  const setTrayOpen = (open) => {
+    tray.hidden = !open;
+    toggleBtn.textContent = open ? "x" : "+";
+    toggleBtn.setAttribute("aria-label", open ? "Close photo controls" : "Add photo");
+    if (!open) {
+      status.textContent = "";
+      return;
+    }
+    if (!state.caregiverImageDraft?.dataUrl) {
+      status.textContent = "Choose a photo.";
+    }
+  };
+
+  const renderTray = () => {
     if (state.caregiverImageDraft?.dataUrl) {
       preview.src = state.caregiverImageDraft.dataUrl;
       preview.style.display = "block";
       status.textContent = `Selected: ${state.caregiverImageDraft.name}`;
-      setPanelOpen(true);
       return;
     }
     preview.removeAttribute("src");
     preview.style.display = "none";
-    if (!panel.hidden) status.textContent = "Select a photo to send.";
+    if (!tray.hidden) status.textContent = "Choose a photo.";
   };
 
   toggleBtn.addEventListener("click", () => {
-    setPanelOpen(panel.hidden);
+    const opening = tray.hidden;
+    if (!opening) {
+      clearDraft();
+      setTrayOpen(false);
+      renderTray();
+      return;
+    }
+    setTrayOpen(true);
+    fileInput.click();
+  });
+
+  chooseBtn.addEventListener("click", () => {
+    fileInput.click();
   });
 
   fileInput.addEventListener("change", async () => {
     const file = fileInput.files?.[0];
-    if (!file) return;
+    if (!file) {
+      renderTray();
+      return;
+    }
     if (!file.type.startsWith("image/")) {
       status.textContent = "Please choose an image file.";
       return;
@@ -1153,17 +1178,17 @@ function wireCaregiverImage(root) {
       const dataUrl = await encodeImageFileForUpload(file);
       state.caregiverImageDraft = { dataUrl, name: file.name };
       status.textContent = "";
-      renderPreview();
+      setTrayOpen(true);
+      renderTray();
     } catch (err) {
       status.textContent = `Could not read image: ${String(err.message || err)}`;
     }
   });
 
   clearBtn.addEventListener("click", () => {
-    state.caregiverImageDraft = null;
-    fileInput.value = "";
-    renderPreview();
-    setPanelOpen(false);
+    clearDraft();
+    setTrayOpen(false);
+    renderTray();
   });
 
   sendBtn.addEventListener("click", async () => {
@@ -1177,8 +1202,8 @@ function wireCaregiverImage(root) {
         "caregiver",
         state.appliedDadUI.imageSize || "medium"
       );
-      state.caregiverImageDraft = null;
-      fileInput.value = "";
+      clearDraft();
+      setTrayOpen(false);
       await loadMessages();
       render();
     } catch (err) {
@@ -1186,8 +1211,8 @@ function wireCaregiverImage(root) {
     }
   });
 
-  setPanelOpen(Boolean(state.caregiverImageDraft?.dataUrl));
-  renderPreview();
+  setTrayOpen(Boolean(state.caregiverImageDraft?.dataUrl));
+  renderTray();
 }
 
 function wireThreadMessageActions(threadEl) {

@@ -56,20 +56,19 @@
             <input id="caregiverInput" autocomplete="off" placeholder="Reply to Dad..." />
             <button type="submit">Send</button>
           </form>
-          <div id="caregiverPhotoPanel" class="row photo-panel" hidden>
-            <label for="caregiverImageFile">Photo</label>
-            <input id="caregiverImageFile" type="file" accept="image/*" />
-            <div class="row image-actions">
+          <input id="caregiverImageFile" type="file" accept="image/*" hidden />
+          <div id="caregiverPhotoTray" class="photo-tray" hidden>
+            <img id="caregiverImagePreview" class="photo-tray-preview" alt="Selected photo preview" />
+            <div class="photo-tray-controls">
+              <button id="chooseCaregiverImage" type="button">Choose photo</button>
+              <select id="imageSize" aria-label="Photo size">
+                <option value="small">Small</option>
+                <option value="medium" selected>Medium</option>
+                <option value="large">Large</option>
+              </select>
               <button id="sendCaregiverImage" type="button">Send Photo</button>
-              <button id="clearCaregiverImage" type="button">Clear</button>
+              <button id="clearCaregiverImage" type="button">Close</button>
             </div>
-            <label>Image size</label>
-            <select id="imageSize">
-              <option value="small">Small</option>
-              <option value="medium" selected>Medium</option>
-              <option value="large">Large</option>
-            </select>
-            <img id="caregiverImagePreview" class="image-preview" alt="Selected photo preview" />
             <p id="imageStatus" class="status"></p>
           </div>
           <div id="dadAlertBanner" class="dad-alert-banner" hidden>
