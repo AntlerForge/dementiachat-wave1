@@ -25,6 +25,7 @@ type NotificationJob = {
   recipient_user_id: string;
   attempts: number;
   messages: {
+    sender_role: string | null;
     content: string | null;
     image_url: string | null;
     created_at: string;
@@ -35,7 +36,7 @@ async function claimJobs(limit = 25): Promise<NotificationJob[]> {
   const { data, error } = await supabase
     .from("notification_jobs")
     .select(
-      "id, conversation_id, message_id, recipient_user_id, attempts, messages(content, image_url, created_at)"
+      "id, conversation_id, message_id, recipient_user_id, attempts, messages(sender_role, content, image_url, created_at)"
     )
     .eq("status", "pending")
     .lte("next_retry_at", new Date().toISOString())
@@ -92,6 +93,8 @@ async function deactivateSubscription(subscriptionId: string) {
 }
 
 function buildPushPayload(job: NotificationJob) {
+  const senderRole = String(job.messages?.sender_role || "").toLowerCase();
+  const isFromCaregiver = senderRole === "caregiver";
   const messageText =
     job.messages?.content && job.messages.content.trim()
       ? job.messages.content.trim()
@@ -99,10 +102,10 @@ function buildPushPayload(job: NotificationJob) {
       ? "[Photo]"
       : "New message";
   return JSON.stringify({
-    title: "Dad sent a message",
+    title: isFromCaregiver ? "Tony sent a message" : "Dad sent a message",
     body: messageText.slice(0, 120),
     url: "/?cloud=1",
-    tag: `dad-message-${job.message_id}`,
+    tag: `${isFromCaregiver ? "caregiver" : "dad"}-message-${job.message_id}`,
   });
 }
 
@@ -120,7 +123,8 @@ Deno.serve(async (_req) => {
           job.conversation_id
         );
         if (!subscriptions.length) {
-          await markJobSent(job.id);
+          await markJobFailed(job.id, job.attempts, "No active push subscriptions");
+          failed += 1;
           continue;
         }
 

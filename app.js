@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.7";
+const APP_VERSION = "wave1-2026-03-26.8";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -38,6 +38,7 @@ let messagesChannelConversationId = null;
 let realtimeRefreshInFlight = false;
 let realtimeRefreshQueued = false;
 let dadAutoSnapTimer = null;
+let outboxSyncPromise = null;
 
 const config = window.APP_CONFIG || {};
 
@@ -199,6 +200,7 @@ const state = {
   runtimeUpdateInProgress: false,
   runtimeLatestSeenVersion: APP_VERSION,
   lastRuntimeVersionCheckAt: 0,
+  lastDadPushEnsureAt: 0,
   lastVersionEmitAt: 0,
   lastVersionFetchAt: 0,
   lastPresenceEmitAt: 0,
@@ -822,6 +824,7 @@ function renderDadView() {
     { passive: true }
   );
   maybeRequestDadAlertPermission();
+  maybeEnsureDadPushSubscription(false);
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1307,6 +1310,34 @@ function maybeRequestDadAlertPermission() {
   });
 }
 
+async function maybeEnsureDadPushSubscription(force = false) {
+  if (state.role !== "dad") return;
+  if (state.appliedDadUI?.alertsEnabled === false) return;
+  if (typeof Notification === "undefined") return;
+  if (Notification.permission !== "granted") return;
+  if (!("PushManager" in window)) return;
+  const now = Date.now();
+  if (!force && now - Number(state.lastDadPushEnsureAt || 0) < 60_000) return;
+  state.lastDadPushEnsureAt = now;
+  try {
+    const registration = await ensureServiceWorkerRegistration();
+    if (!registration) return;
+    const vapidPublicKey = String(config.PUSH_VAPID_PUBLIC_KEY || "").trim();
+    if (!vapidPublicKey) return;
+    const existing = await registration.pushManager.getSubscription();
+    const subscription =
+      existing ||
+      (await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+      }));
+    await savePushSubscription(subscription);
+    state.pushSubscribed = true;
+  } catch (err) {
+    console.warn("Dad push subscription ensure failed", err);
+  }
+}
+
 async function enablePushAlerts() {
   if (typeof Notification === "undefined") return;
   if (!("PushManager" in window)) {
@@ -1345,7 +1376,9 @@ async function enablePushAlerts() {
 }
 
 async function savePushSubscription(subscription) {
-  if (!supabase || !state.conversationId || !subscription) return;
+  if (!supabase) throw new Error("Cloud mode is required for push subscriptions.");
+  if (!state.conversationId) throw new Error("No conversation selected for push subscription.");
+  if (!subscription) throw new Error("Missing push subscription object.");
   const payload = subscription.toJSON();
   const endpoint = payload.endpoint || "";
   const p256dh = payload.keys?.p256dh || "";
@@ -1859,13 +1892,13 @@ async function emitPresenceHeartbeat(force = false) {
   const now = Date.now();
   if (!force && now - state.lastPresenceEmitAt < PRESENCE_HEARTBEAT_MS) return;
   state.lastPresenceEmitAt = now;
-  const role = String(state.profile?.role || state.roleHint || state.role || "").toLowerCase();
-  if (!role || role === "unknown") return;
+  const surfaceRole = state.role === "dad" ? "dad" : "caregiver";
+  const profileRole = String(state.profile?.role || state.roleHint || "").toLowerCase();
   try {
     await supabase.from("activity_events").insert({
       conversation_id: state.conversationId,
       event_type: "presence_ping",
-      payload: { role, version: APP_VERSION },
+      payload: { role: surfaceRole, profile_role: profileRole, version: APP_VERSION },
     });
   } catch (err) {
     console.warn("presence heartbeat failed", err);
@@ -2004,7 +2037,7 @@ async function loadDadOnlineStatus(force = false) {
       .from("activity_events")
       .select("created_at")
       .eq("conversation_id", state.conversationId)
-      .eq("event_type", "presence_ping")
+      .in("event_type", ["presence_ping", "app_version"])
       .eq("payload->>role", "dad")
       .order("created_at", { ascending: false })
       .limit(1)
@@ -2069,6 +2102,36 @@ function playDadAlertSound() {
   }
 }
 
+function messageMergeKey(msg) {
+  if (!msg) return "";
+  if (msg.id) return `id:${String(msg.id)}`;
+  if (msg.client_msg_id) return `cid:${String(msg.client_msg_id)}`;
+  return "";
+}
+
+/** Preserve very recent local rows when fetch temporarily lags behind inserts. */
+function mergeFetchedMessagesWithRecentLocal(fetchedRows) {
+  const fetchedAsc = [...(Array.isArray(fetchedRows) ? fetchedRows : [])].reverse();
+  const seen = new Set();
+  for (const row of fetchedAsc) {
+    const key = messageMergeKey(row);
+    if (key) seen.add(key);
+  }
+  const now = Date.now();
+  const graceMs = 10 * 60_000;
+  const merged = [...fetchedAsc];
+  for (const local of Array.isArray(state.messages) ? state.messages : []) {
+    const key = messageMergeKey(local);
+    if (!key || seen.has(key)) continue;
+    const createdAtMs = new Date(String(local.created_at || "")).getTime();
+    if (!Number.isFinite(createdAtMs) || now - createdAtMs > graceMs) continue;
+    merged.push(local);
+    seen.add(key);
+  }
+  merged.sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+  return merged.slice(-240);
+}
+
 async function loadMessages() {
   if (supabase && state.session) {
     await ensureConversation();
@@ -2108,7 +2171,7 @@ async function loadMessages() {
     }
 
     const rows = Array.isArray(data) ? data : [];
-    state.messages = [...rows].reverse();
+    state.messages = mergeFetchedMessagesWithRecentLocal(rows);
     persistMessagesCache(state.messages);
     return;
   }
@@ -2156,7 +2219,12 @@ async function queueMessage(content, senderRole) {
   };
   state.outbox.push(message);
   persistOutbox();
-  await syncOutboxOnce();
+  render();
+  await syncOutboxWithLock();
+  const failed = state.outbox.find(
+    (x) => String(x.client_msg_id || "") === String(message.client_msg_id) && x.status === "failed"
+  );
+  if (failed) throw new Error(String(failed.error || "Send failed"));
 }
 
 async function queueImageMessage(imageUrl, senderRole, imageSize) {
@@ -2193,7 +2261,12 @@ async function queueImageMessage(imageUrl, senderRole, imageSize) {
   };
   state.outbox.push(message);
   persistOutbox();
-  await syncOutboxOnce();
+  render();
+  await syncOutboxWithLock();
+  const failed = state.outbox.find(
+    (x) => String(x.client_msg_id || "") === String(message.client_msg_id) && x.status === "failed"
+  );
+  if (failed) throw new Error(String(failed.error || "Send photo failed"));
 }
 
 async function syncOutboxOnce() {
@@ -2220,6 +2293,20 @@ async function syncOutboxOnce() {
   if (state.outbox.length !== beforeLength) changed = true;
   persistOutbox();
   return changed;
+}
+
+async function syncOutboxWithLock() {
+  if (outboxSyncPromise) return outboxSyncPromise;
+  outboxSyncPromise = (async () => {
+    state.outboxSyncInFlight = true;
+    try {
+      return await syncOutboxOnce();
+    } finally {
+      state.outboxSyncInFlight = false;
+      outboxSyncPromise = null;
+    }
+  })();
+  return outboxSyncPromise;
 }
 
 async function sendRemote(msg) {
@@ -2422,22 +2509,13 @@ async function deleteMessage(messageId) {
 function startOutboxSyncLoop() {
   const ms = Number(config.OUTBOX_SYNC_MS || 5000);
   setInterval(async () => {
-    if (state.outboxSyncInFlight) return;
-    state.outboxSyncInFlight = true;
     try {
-      const changed = await syncOutboxOnce();
-      if (
-        changed &&
-        !state.authRequired &&
-        state.role === "caregiver" &&
-        !isUserEditingControl()
-      ) {
+      const changed = await syncOutboxWithLock();
+      if (changed && !state.authRequired && !isUserEditingControl()) {
         render();
       }
     } catch (err) {
       console.warn("Outbox sync loop failed", err);
-    } finally {
-      state.outboxSyncInFlight = false;
     }
   }, ms);
 }
@@ -2452,6 +2530,7 @@ function startMessageRefreshLoop() {
       const beforeSig = appStateSignature();
       const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
       await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus(), loadDadOnlineStatus()]);
+      await maybeEnsureDadPushSubscription(false);
       await emitPresenceHeartbeat(false);
       await emitAppVersionHeartbeat(false);
       await loadVersionStatus(false);
@@ -2945,11 +3024,9 @@ function showFatalStartupError(err) {
 }
 
 function formatTime(iso) {
-  try {
-    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  } catch {
-    return "";
-  }
+  const dt = new Date(iso);
+  if (!Number.isFinite(dt.getTime())) return "unknown";
+  return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function truncate(value, n) {

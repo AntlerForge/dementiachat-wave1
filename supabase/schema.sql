@@ -803,14 +803,20 @@ create trigger trg_messages_updated_at
 before update on messages
 for each row execute function set_updated_at();
 
-create or replace function queue_dad_message_notifications()
+create or replace function queue_message_notifications()
 returns trigger
 language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  v_target_roles text[];
 begin
-  if new.sender_role <> 'dad' then
+  if new.sender_role = 'dad' then
+    v_target_roles := array['caregiver', 'caregiver_admin'];
+  elsif new.sender_role = 'caregiver' then
+    v_target_roles := array['dad'];
+  else
     return new;
   end if;
 
@@ -823,7 +829,7 @@ begin
     now()
   from conversation_members cm
   where cm.conversation_id = new.conversation_id
-    and cm.member_role in ('caregiver', 'caregiver_admin')
+    and cm.member_role = any(v_target_roles)
   on conflict (message_id, recipient_user_id) do nothing;
 
   return new;
@@ -831,9 +837,10 @@ end;
 $$;
 
 drop trigger if exists trg_messages_notify_caregiver on messages;
-create trigger trg_messages_notify_caregiver
+drop trigger if exists trg_messages_notify_push on messages;
+create trigger trg_messages_notify_push
 after insert on messages
-for each row execute function queue_dad_message_notifications();
+for each row execute function queue_message_notifications();
 
 -- RLS scaffolding.
 alter table profiles enable row level security;
