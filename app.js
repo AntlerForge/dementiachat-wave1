@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.11";
+const APP_VERSION = "wave1-2026-03-26.12";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -39,6 +39,7 @@ let realtimeRefreshInFlight = false;
 let realtimeRefreshQueued = false;
 let dadAutoSnapTimer = null;
 let outboxSyncPromise = null;
+let dadFallbackPopupEl = null;
 
 const config = window.APP_CONFIG || {};
 
@@ -209,6 +210,8 @@ const state = {
   lastDadPresenceFetchAt: 0,
   dadAlertUnreadCount: 0,
   dadAlertText: "",
+  dadPendingPopupMessageId: "",
+  dadPendingPopupPreview: "",
   lastDadMessageAt: localStorage.getItem(DAD_LAST_MSG_AT_KEY) || "",
   lastDadMessageId: localStorage.getItem(DAD_LAST_MSG_ID_KEY) || "",
   lastCaregiverMessageAt: localStorage.getItem(CAREGIVER_LAST_MSG_AT_KEY) || "",
@@ -872,6 +875,7 @@ function renderDadView() {
     const text = input.value.trim();
     if (!text) return;
     await maybeEnsureDadPushSubscription(true);
+    dismissDadFallbackPopup();
     input.value = "";
     state.dadDraft = "";
     localStorage.setItem(DAD_DRAFT_KEY, "");
@@ -892,6 +896,7 @@ function renderDadView() {
   if (state.dadStickToBottom) {
     scrollThreadToBottom(thread);
   }
+  showDadFallbackPopupIfNeeded();
   scheduleDadAutoSnap(thread);
   state.dadVisibleMessageCount = visibleCount;
 }
@@ -2037,6 +2042,77 @@ function handleDadInboundFromCaregiver(beforeMessages, afterMessages) {
   const preview = truncate(latestAfter.content || "[Image message]", 120);
   playDadAlertSound();
   showSystemNotification("Tony sent a message", preview, "caregiver-inbound-alert");
+  queueDadFallbackPopup(latestAfter.id, preview);
+}
+
+function queueDadFallbackPopup(messageId, preview) {
+  if (state.role !== "dad") return;
+  const mid = String(messageId || "");
+  if (!mid) return;
+  if (state.dadPendingPopupMessageId === mid) return;
+  state.dadPendingPopupMessageId = mid;
+  state.dadPendingPopupPreview = String(preview || "New message from Tony");
+}
+
+function dismissDadFallbackPopup() {
+  state.dadPendingPopupMessageId = "";
+  state.dadPendingPopupPreview = "";
+  if (dadFallbackPopupEl) {
+    dadFallbackPopupEl.remove();
+    dadFallbackPopupEl = null;
+  }
+}
+
+function showDadFallbackPopupIfNeeded() {
+  if (state.role !== "dad") return;
+  if (state.appliedDadUI?.alertsEnabled === false) {
+    dismissDadFallbackPopup();
+    return;
+  }
+  const hasPending = Boolean(state.dadPendingPopupMessageId);
+  if (!hasPending) {
+    dismissDadFallbackPopup();
+    return;
+  }
+  if (!dadFallbackPopupEl) {
+    const overlay = document.createElement("div");
+    overlay.style.position = "fixed";
+    overlay.style.inset = "0";
+    overlay.style.zIndex = "10010";
+    overlay.style.background = "rgba(15, 23, 42, 0.45)";
+    overlay.style.display = "grid";
+    overlay.style.placeItems = "center";
+    overlay.innerHTML = `
+      <div style="width:min(92vw,460px);background:#ffffff;border:2px solid #1d4ed8;border-radius:14px;padding:16px;box-shadow:0 18px 42px rgba(15,23,42,.35);">
+        <h3 style="margin:0 0 8px;color:#1e3a8a;font-size:1.2rem;">New message from Tony</h3>
+        <p id="dadFallbackPopupText" style="margin:0 0 14px;color:#0f172a;line-height:1.45;"></p>
+        <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
+          <button id="dadFallbackDismiss" type="button">Dismiss</button>
+          <button id="dadFallbackOpen" type="button" style="background:#2563eb;border-color:#1d4ed8;color:#fff;">Open message</button>
+        </div>
+      </div>
+    `;
+    dadFallbackPopupEl = overlay;
+    document.body.appendChild(overlay);
+    const dismissBtn = overlay.querySelector("#dadFallbackDismiss");
+    const openBtn = overlay.querySelector("#dadFallbackOpen");
+    if (dismissBtn) {
+      dismissBtn.addEventListener("click", () => {
+        dismissDadFallbackPopup();
+      });
+    }
+    if (openBtn) {
+      openBtn.addEventListener("click", () => {
+        dismissDadFallbackPopup();
+        state.dadStickToBottom = true;
+        window.focus();
+        const thread = document.getElementById("dadThread");
+        if (thread) scrollThreadToBottom(thread);
+      });
+    }
+  }
+  const textEl = dadFallbackPopupEl.querySelector("#dadFallbackPopupText");
+  if (textEl) textEl.textContent = state.dadPendingPopupPreview || "Tap to open your chat.";
 }
 
 async function loadDadTypingStatus() {
