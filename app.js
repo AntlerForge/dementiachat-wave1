@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.10";
+const APP_VERSION = "wave1-2026-03-26.11";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -818,6 +818,13 @@ function renderDadView() {
   const form = node.getElementById("dadComposer");
   const input = node.getElementById("dadInput");
   input.value = state.dadDraft;
+  input.addEventListener("focus", () => {
+    maybeRequestDadAlertPermission(true);
+    maybeEnsureDadPushSubscription(true);
+  });
+  input.addEventListener("pointerdown", () => {
+    maybeRequestDadAlertPermission(true);
+  });
   input.addEventListener("input", () => {
     state.dadDraft = input.value;
     localStorage.setItem(DAD_DRAFT_KEY, state.dadDraft);
@@ -864,6 +871,7 @@ function renderDadView() {
     }
     const text = input.value.trim();
     if (!text) return;
+    await maybeEnsureDadPushSubscription(true);
     input.value = "";
     state.dadDraft = "";
     localStorage.setItem(DAD_DRAFT_KEY, "");
@@ -1327,13 +1335,15 @@ function getAlertEnableUiState() {
   return { label: "Enable alerts", disabled: false };
 }
 
-function maybeRequestDadAlertPermission() {
+function maybeRequestDadAlertPermission(fromUserGesture = false) {
   if (state.role !== "dad") return;
   if (state.appliedDadUI?.alertsEnabled === false) return;
   if (typeof Notification === "undefined") return;
   if (Notification.permission !== "default") return;
   const lastPromptAt = Number(localStorage.getItem(DAD_ALERT_PROMPTED_AT_KEY) || 0);
   if (Date.now() - lastPromptAt < DAD_ALERT_PROMPT_RETRY_MS) return;
+  // Edge/Chromium may reject notification prompts without a user gesture.
+  if (!fromUserGesture && document.visibilityState === "visible") return;
   localStorage.setItem(DAD_ALERT_PROMPTED_AT_KEY, String(Date.now()));
   Notification.requestPermission().catch(() => {
     // noop
@@ -2018,14 +2028,6 @@ function handleDadInboundFromCaregiver(beforeMessages, afterMessages) {
   const latestAfter = getLatestMessageByRole(afterMessages, "caregiver");
   if (!latestAfter) return;
   if (latestBefore && latestBefore.id === latestAfter.id) return;
-  if (
-    !hasNewMessageSinceMarker(
-      latestAfter,
-      state.lastCaregiverMessageAt,
-      String(state.lastCaregiverMessageId)
-    )
-  )
-    return;
 
   state.lastCaregiverMessageAt = latestAfter.created_at || "";
   state.lastCaregiverMessageId = latestAfter.id || "";
