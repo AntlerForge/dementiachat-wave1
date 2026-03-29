@@ -192,6 +192,10 @@ body {
   gap: 8px;
 }
 
+.photo-tray[hidden] {
+  display: none;
+}
+
 .photo-tray-controls {
   display: grid;
   grid-template-columns: 1fr 110px 1fr auto;
