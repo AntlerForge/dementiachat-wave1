@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.9";
+const APP_VERSION = "wave1-2026-03-26.10";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -230,6 +230,7 @@ const state = {
   runtimeLatestSeenVersion: APP_VERSION,
   lastRuntimeVersionCheckAt: 0,
   lastDadPushEnsureAt: 0,
+  recentlySentClientMsgAt: {},
   lastVersionEmitAt: 0,
   lastVersionFetchAt: 0,
   lastPresenceEmitAt: 0,
@@ -2138,6 +2139,21 @@ function messageMergeKey(msg) {
   return "";
 }
 
+function markRecentlySentClientMsgId(clientMsgId) {
+  const cid = String(clientMsgId || "");
+  if (!cid) return;
+  state.recentlySentClientMsgAt[cid] = Date.now();
+}
+
+function pruneRecentlySentClientMsgIds(maxAgeMs = 10 * 60_000) {
+  const now = Date.now();
+  for (const [cid, at] of Object.entries(state.recentlySentClientMsgAt || {})) {
+    if (!Number.isFinite(Number(at)) || now - Number(at) > maxAgeMs) {
+      delete state.recentlySentClientMsgAt[cid];
+    }
+  }
+}
+
 /** Preserve very recent local rows when fetch temporarily lags behind inserts. */
 function mergeFetchedMessagesWithRecentLocal(fetchedRows) {
   const fetchedAsc = [...(Array.isArray(fetchedRows) ? fetchedRows : [])].reverse();
@@ -2148,10 +2164,13 @@ function mergeFetchedMessagesWithRecentLocal(fetchedRows) {
   }
   const now = Date.now();
   const graceMs = 10 * 60_000;
+  pruneRecentlySentClientMsgIds(graceMs);
   const merged = [...fetchedAsc];
   for (const local of Array.isArray(state.messages) ? state.messages : []) {
     const key = messageMergeKey(local);
     if (!key || seen.has(key)) continue;
+    const cid = String(local.client_msg_id || "");
+    if (!cid || !state.recentlySentClientMsgAt[cid]) continue;
     const createdAtMs = new Date(String(local.created_at || "")).getTime();
     if (!Number.isFinite(createdAtMs) || now - createdAtMs > graceMs) continue;
     merged.push(local);
@@ -2306,6 +2325,7 @@ async function syncOutboxOnce() {
       await withTimeout(sendRemote(item), SEND_OPERATION_TIMEOUT_MS, "Remote send");
       if (item.status !== "sent") {
         item.status = "sent";
+        markRecentlySentClientMsgId(item.client_msg_id);
         changed = true;
       }
     } catch (err) {
