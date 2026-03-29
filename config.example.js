@@ -25,6 +25,8 @@ window.APP_CONFIG = {
   // IMAGE_STORAGE_BUCKET: "chat-images",
   // Supabase REST fetch timeout (ms); helps slow networks / large responses (default 120000).
   // SUPABASE_FETCH_TIMEOUT_MS: 120000,
+  // Per-send operation timeout (ms) before surfacing a failed send state (default 15000).
+  // SEND_OPERATION_TIMEOUT_MS: 15000,
   // App update polling via service worker (defaults: 5 min check, 60s idle auto-apply).
   // APP_UPDATE_CHECK_MS: 300000,
   // APP_UPDATE_IDLE_RELOAD_MS: 60000,

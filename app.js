@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.8";
+const APP_VERSION = "wave1-2026-03-26.9";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -58,6 +58,10 @@ function parseMsWithDefault(value, fallback) {
 const SUPABASE_FETCH_TIMEOUT_MS = Math.min(
   300_000,
   Math.max(45_000, parseMsWithDefault(config.SUPABASE_FETCH_TIMEOUT_MS, 180_000))
+);
+const SEND_OPERATION_TIMEOUT_MS = Math.max(
+  8_000,
+  parseMsWithDefault(config.SEND_OPERATION_TIMEOUT_MS, 15_000)
 );
 const APP_UPDATE_CHECK_MS = Math.max(60_000, parseMsWithDefault(config.APP_UPDATE_CHECK_MS, 300_000));
 const APP_UPDATE_IDLE_RELOAD_MS = Math.max(
@@ -107,6 +111,31 @@ function isAbortLikeError(err) {
   if (name === "AbortError") return true;
   const msg = String(err?.message || err || "").toLowerCase();
   return msg.includes("abort") || msg.includes("timeout") || msg.includes("timed out");
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  const ms = Math.max(1, Number(timeoutMs || 0));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${label || "Operation"} timed out after ${ms}ms`));
+    }, ms);
+    Promise.resolve(promise)
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
 }
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -2198,7 +2227,7 @@ function mergeServerMessageIntoState(row) {
 async function queueMessage(content, senderRole) {
   if (supabase && state.session) {
     try {
-      await ensureConversation();
+      await withTimeout(ensureConversation(), SEND_OPERATION_TIMEOUT_MS, "Conversation setup");
     } catch (err) {
       // Do not block send on transient re-join failure if we already have a conversation id.
       if (!state.conversationId) throw err;
@@ -2220,7 +2249,7 @@ async function queueMessage(content, senderRole) {
   state.outbox.push(message);
   persistOutbox();
   render();
-  await syncOutboxWithLock();
+  await withTimeout(syncOutboxWithLock(), SEND_OPERATION_TIMEOUT_MS, "Send");
   const failed = state.outbox.find(
     (x) => String(x.client_msg_id || "") === String(message.client_msg_id) && x.status === "failed"
   );
@@ -2230,7 +2259,7 @@ async function queueMessage(content, senderRole) {
 async function queueImageMessage(imageUrl, senderRole, imageSize) {
   if (supabase && state.session) {
     try {
-      await ensureConversation();
+      await withTimeout(ensureConversation(), SEND_OPERATION_TIMEOUT_MS, "Conversation setup");
     } catch (err) {
       if (!state.conversationId) throw err;
       console.warn(
@@ -2262,7 +2291,7 @@ async function queueImageMessage(imageUrl, senderRole, imageSize) {
   state.outbox.push(message);
   persistOutbox();
   render();
-  await syncOutboxWithLock();
+  await withTimeout(syncOutboxWithLock(), SEND_OPERATION_TIMEOUT_MS, "Send photo");
   const failed = state.outbox.find(
     (x) => String(x.client_msg_id || "") === String(message.client_msg_id) && x.status === "failed"
   );
@@ -2274,7 +2303,7 @@ async function syncOutboxOnce() {
   for (const item of state.outbox) {
     if (item.status === "sent") continue;
     try {
-      await sendRemote(item);
+      await withTimeout(sendRemote(item), SEND_OPERATION_TIMEOUT_MS, "Remote send");
       if (item.status !== "sent") {
         item.status = "sent";
         changed = true;
