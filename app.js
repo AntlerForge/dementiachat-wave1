@@ -23,7 +23,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.12";
+const APP_VERSION = "wave1-2026-03-26.13";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -40,6 +40,8 @@ let realtimeRefreshQueued = false;
 let dadAutoSnapTimer = null;
 let outboxSyncPromise = null;
 let dadFallbackPopupEl = null;
+let dadAttentionTitleTimer = null;
+let dadAttentionTitleFlip = false;
 
 const config = window.APP_CONFIG || {};
 
@@ -504,6 +506,12 @@ function render() {
   if (state.role === "dad") {
     renderDadView();
   } else {
+    clearDadAttentionTitleTimer();
+    if (typeof navigator.clearAppBadge === "function") {
+      navigator.clearAppBadge().catch(() => {
+        /* noop */
+      });
+    }
     renderCaregiverView();
   }
 }
@@ -2052,6 +2060,7 @@ function queueDadFallbackPopup(messageId, preview) {
   if (state.dadPendingPopupMessageId === mid) return;
   state.dadPendingPopupMessageId = mid;
   state.dadPendingPopupPreview = String(preview || "New message from Tony");
+  updateDadAttentionSignals();
 }
 
 function dismissDadFallbackPopup() {
@@ -2061,6 +2070,7 @@ function dismissDadFallbackPopup() {
     dadFallbackPopupEl.remove();
     dadFallbackPopupEl = null;
   }
+  updateDadAttentionSignals();
 }
 
 function showDadFallbackPopupIfNeeded() {
@@ -2113,6 +2123,40 @@ function showDadFallbackPopupIfNeeded() {
   }
   const textEl = dadFallbackPopupEl.querySelector("#dadFallbackPopupText");
   if (textEl) textEl.textContent = state.dadPendingPopupPreview || "Tap to open your chat.";
+}
+
+function clearDadAttentionTitleTimer() {
+  if (!dadAttentionTitleTimer) return;
+  clearInterval(dadAttentionTitleTimer);
+  dadAttentionTitleTimer = null;
+}
+
+function updateDadAttentionSignals() {
+  if (state.role !== "dad") return;
+  const hasUnread = Boolean(state.dadPendingPopupMessageId);
+  if (hasUnread) {
+    if (typeof navigator.setAppBadge === "function") {
+      navigator.setAppBadge(1).catch(() => {
+        /* noop */
+      });
+    }
+    if (!dadAttentionTitleTimer) {
+      dadAttentionTitleFlip = false;
+      dadAttentionTitleTimer = setInterval(() => {
+        dadAttentionTitleFlip = !dadAttentionTitleFlip;
+        document.title = dadAttentionTitleFlip ? "NEW MESSAGE - Tony Chat" : "Tony Chat";
+      }, 900);
+    }
+    return;
+  }
+
+  clearDadAttentionTitleTimer();
+  if (typeof navigator.clearAppBadge === "function") {
+    navigator.clearAppBadge().catch(() => {
+      /* noop */
+    });
+  }
+  updateAppTitle();
 }
 
 async function loadDadTypingStatus() {
