@@ -304,6 +304,38 @@ select:focus {
   font-size: 0.9rem;
 }
 
+.diagnostics {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #f8fafc;
+}
+
+.diagnostics summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.diag-log {
+  margin: 8px 0;
+  max-height: 170px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+}
+
+.diag-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .dad-alert-banner {
   display: grid;
   gap: 8px;

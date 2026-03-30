@@ -40,3 +40,21 @@ Suggested schedule:
 Security notes:
 - Keep VAPID private key server-side only
 - Restrict invocation (cron/scheduler only)
+
+## diagnostics-read
+
+Purpose:
+- Read recent `client_diag` rows from `activity_events`
+- Return summary counts and last-seen times by role
+- Provide autonomous lockup diagnostics without browser DevTools access
+
+Environment variables required:
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+Endpoint query parameters:
+- `conversation_id` (required)
+- `limit` (optional, default 120, min 10 max 500)
+
+Security notes:
+- Uses service role key and should be restricted to trusted operators.

@@ -18,12 +18,13 @@ const DAD_DRAFT_KEY = "carechat.dad_draft";
 const CAREGIVER_DRAFT_KEY = "carechat.caregiver_draft";
 const CAREGIVER_TAB_KEY = "carechat.caregiver_tab";
 const DAD_UI_DRAFT_KEY = "carechat.dad_ui_draft";
+const DEVICE_ID_KEY = "carechat.device_id";
 const DAD_LAST_MSG_AT_KEY = "carechat.dad_last_msg_at";
 const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.13";
+const APP_VERSION = "wave1-2026-03-26.14";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -87,6 +88,9 @@ const DAD_INACTIVE_AUTO_SCROLL_MS = Math.max(
 );
 const IMAGE_STORAGE_BUCKET = String(config.IMAGE_STORAGE_BUCKET || "chat-images").trim();
 const USE_STORAGE_FOR_IMAGES = config.USE_STORAGE_FOR_IMAGES !== false;
+const CLIENT_DIAG_THROTTLE_MS = Math.max(1_500, parseMsWithDefault(config.CLIENT_DIAG_THROTTLE_MS, 5_000));
+const CLIENT_WATCHDOG_MS = Math.max(5_000, parseMsWithDefault(config.CLIENT_WATCHDOG_MS, 15_000));
+const CLIENT_REFRESH_STALL_MS = Math.max(20_000, parseMsWithDefault(config.CLIENT_REFRESH_STALL_MS, 45_000));
 
 function fetchWithTimeout(url, options = {}) {
   const { signal: outer, ...rest } = options;
@@ -160,6 +164,18 @@ const supabase = hasSupabaseConfig
       },
     })
   : null;
+
+function getOrCreateDeviceId() {
+  try {
+    const existing = String(localStorage.getItem(DEVICE_ID_KEY) || "").trim();
+    if (existing) return existing;
+    const id = crypto.randomUUID();
+    localStorage.setItem(DEVICE_ID_KEY, id);
+    return id;
+  } catch {
+    return crypto.randomUUID();
+  }
+}
 
 const state = {
   role: localStorage.getItem(ROLE_KEY) || "dad",
@@ -236,10 +252,107 @@ const state = {
   lastRuntimeVersionCheckAt: 0,
   lastDadPushEnsureAt: 0,
   recentlySentClientMsgAt: {},
+  debugEvents: [],
+  deviceId: getOrCreateDeviceId(),
+  lastDiagEmitAtByKey: {},
+  lastRefreshOkAt: Date.now(),
+  lastOutboxOkAt: Date.now(),
+  recoveringClient: false,
   lastVersionEmitAt: 0,
   lastVersionFetchAt: 0,
   lastPresenceEmitAt: 0,
 };
+
+function pushDebugEvent(level, message, details = "") {
+  const line = `${new Date().toISOString()} [${String(level || "info").toUpperCase()}] ${String(
+    message || ""
+  )}${details ? ` :: ${String(details)}` : ""}`;
+  state.debugEvents.push(line);
+  if (state.debugEvents.length > 40) {
+    state.debugEvents = state.debugEvents.slice(-40);
+  }
+}
+
+const originalConsoleWarn = console.warn.bind(console);
+console.warn = (...args) => {
+  try {
+    pushDebugEvent("warn", args[0], args.slice(1).map((x) => String(x)).join(" | "));
+  } catch {
+    /* noop */
+  }
+  originalConsoleWarn(...args);
+};
+
+const originalConsoleError = console.error.bind(console);
+console.error = (...args) => {
+  try {
+    pushDebugEvent("error", args[0], args.slice(1).map((x) => String(x)).join(" | "));
+  } catch {
+    /* noop */
+  }
+  originalConsoleError(...args);
+};
+
+function shouldEmitDiagNow(key, force = false) {
+  if (force) return true;
+  const now = Date.now();
+  const prev = Number(state.lastDiagEmitAtByKey[key] || 0);
+  if (now - prev < CLIENT_DIAG_THROTTLE_MS) return false;
+  state.lastDiagEmitAtByKey[key] = now;
+  return true;
+}
+
+async function emitClientDiagnostic(event, payload = {}, options = {}) {
+  if (!supabase || !state.session || !state.conversationId) return;
+  const name = String(event || "").trim();
+  if (!name) return;
+  const throttleKey = String(options?.throttleKey || name);
+  if (!shouldEmitDiagNow(throttleKey, Boolean(options?.force))) return;
+  const safePayload = {
+    ...payload,
+    event: name,
+    role: state.role,
+    profile_role: String(state.profile?.role || ""),
+    device_id: state.deviceId,
+    app_version: APP_VERSION,
+    auth_required: Boolean(state.authRequired),
+    push_permission: typeof Notification === "undefined" ? "unsupported" : Notification.permission,
+    push_subscribed: Boolean(state.pushSubscribed),
+    ts_ms: Date.now(),
+  };
+  try {
+    await supabase.from("activity_events").insert({
+      conversation_id: state.conversationId,
+      event_type: "client_diag",
+      payload: safePayload,
+    });
+  } catch (err) {
+    originalConsoleWarn("client_diag emit failed", err);
+  }
+}
+
+async function recoverClientPipeline(reason) {
+  if (!supabase || !state.session || !state.conversationId) return;
+  if (state.recoveringClient) return;
+  state.recoveringClient = true;
+  try {
+    await emitClientDiagnostic("recover_start", { reason }, { force: true, throttleKey: "recover" });
+    await syncMessagesRealtimeSubscription();
+    await loadMessages();
+    await loadRemoteSettings();
+    state.lastRefreshOkAt = Date.now();
+    render();
+    await emitClientDiagnostic("recover_ok", { reason }, { force: true, throttleKey: "recover_ok" });
+  } catch (err) {
+    await emitClientDiagnostic(
+      "recover_failed",
+      { reason, error: String(err?.message || err) },
+      { force: true, throttleKey: "recover_failed" }
+    );
+  } finally {
+    state.recoveringClient = false;
+  }
+}
 
 init().catch((err) => {
   console.error(err);
@@ -277,8 +390,10 @@ async function init() {
   }
   startOutboxSyncLoop();
   startMessageRefreshLoop();
+  setupClientWatchdog();
   await setupServiceWorker();
   setupAppUpdatePolling();
+  emitClientDiagnostic("init_ready", { mode: supabase ? "cloud" : "local" }, { force: true });
   render();
 }
 
@@ -873,6 +988,7 @@ function renderDadView() {
   );
   maybeRequestDadAlertPermission();
   maybeEnsureDadPushSubscription(false);
+  wireDiagnosticsPanel(node, "dad");
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -893,6 +1009,7 @@ function renderDadView() {
       await loadMessages();
       render();
     } catch (err) {
+      pushDebugEvent("error", "Dad send failed", String(err?.message || err));
       state.dadDraft = text;
       localStorage.setItem(DAD_DRAFT_KEY, state.dadDraft);
       input.value = text;
@@ -981,6 +1098,7 @@ function renderCaregiverView() {
       await loadMessages();
       render();
     } catch (err) {
+      pushDebugEvent("error", "Caregiver send failed", String(err?.message || err));
       state.caregiverDraft = text;
       localStorage.setItem(CAREGIVER_DRAFT_KEY, state.caregiverDraft);
       input.value = text;
@@ -995,6 +1113,7 @@ function renderCaregiverView() {
   wireDadUiPane(node);
   wireCaregiverUiPane(node);
   wireAiRulesPane(node);
+  wireDiagnosticsPanel(node, "caregiver");
 
   if (dadAlertBanner && dadAlertText && clearDadAlert && enableAlerts) {
     if (state.dadAlertUnreadCount > 0) {
@@ -1388,6 +1507,7 @@ async function maybeEnsureDadPushSubscription(force = false) {
     state.pushSubscribed = true;
   } catch (err) {
     console.warn("Dad push subscription ensure failed", err);
+    emitClientDiagnostic("push_subscribe_failed", { error: String(err?.message || err) });
   }
 }
 
@@ -1424,6 +1544,7 @@ async function enablePushAlerts() {
     state.pushSubscribed = true;
   } catch (err) {
     console.warn("Enable push alerts failed", err);
+    emitClientDiagnostic("push_enable_failed", { error: String(err?.message || err) });
     alert(`Enable alerts failed: ${String(err?.message || err)}`);
   }
 }
@@ -1837,7 +1958,7 @@ function renderBubble(msg, options = {}) {
   const meta = document.createElement("div");
   meta.className = "meta";
   const hidden = msg.hidden_for_dad ? " hidden-for-dad" : "";
-  meta.textContent = `${senderLabel(msg.sender_role)} · ${formatTime(msg.created_at)}${hidden}`;
+  meta.textContent = `${senderLabel(msg.sender_role)} · ${formatMessageTime(msg.created_at)}${hidden}`;
   bubble.appendChild(meta);
   return bubble;
 }
@@ -1883,7 +2004,7 @@ function renderPendingBubble(msg) {
   const meta = document.createElement("div");
   meta.className = "meta";
   const label = msg.status === "failed" ? "failed, will retry" : "sending";
-  meta.textContent = `${senderLabel(msg.sender_role)} · ${formatTime(msg.created_at)} · ${label}`;
+  meta.textContent = `${senderLabel(msg.sender_role)} · ${formatMessageTime(msg.created_at)} · ${label}`;
   bubble.appendChild(meta);
   return bubble;
 }
@@ -2203,6 +2324,7 @@ async function loadDadOnlineStatus(force = false) {
     state.dadOnline = Number.isFinite(ageMs) && ageMs <= DAD_ONLINE_WINDOW_MS;
   } catch {
     state.dadOnline = false;
+    emitClientDiagnostic("presence_load_failed", {}, { throttleKey: "presence_load_failed" });
   }
 }
 
@@ -2387,6 +2509,11 @@ async function queueMessage(content, senderRole) {
     created_at: new Date().toISOString(),
     status: "sending",
   };
+  emitClientDiagnostic("send_start", {
+    sender_role: senderRole,
+    client_msg_id: message.client_msg_id,
+    has_image: false,
+  });
   state.outbox.push(message);
   persistOutbox();
   render();
@@ -2395,6 +2522,11 @@ async function queueMessage(content, senderRole) {
     (x) => String(x.client_msg_id || "") === String(message.client_msg_id) && x.status === "failed"
   );
   if (failed) throw new Error(String(failed.error || "Send failed"));
+  emitClientDiagnostic("send_ok", {
+    sender_role: senderRole,
+    client_msg_id: message.client_msg_id,
+    has_image: false,
+  });
 }
 
 async function queueImageMessage(imageUrl, senderRole, imageSize) {
@@ -2429,6 +2561,12 @@ async function queueImageMessage(imageUrl, senderRole, imageSize) {
     created_at: new Date().toISOString(),
     status: "sending",
   };
+  emitClientDiagnostic("send_start", {
+    sender_role: senderRole,
+    client_msg_id: message.client_msg_id,
+    has_image: true,
+    image_size: message.image_size,
+  });
   state.outbox.push(message);
   persistOutbox();
   render();
@@ -2437,6 +2575,12 @@ async function queueImageMessage(imageUrl, senderRole, imageSize) {
     (x) => String(x.client_msg_id || "") === String(message.client_msg_id) && x.status === "failed"
   );
   if (failed) throw new Error(String(failed.error || "Send photo failed"));
+  emitClientDiagnostic("send_ok", {
+    sender_role: senderRole,
+    client_msg_id: message.client_msg_id,
+    has_image: true,
+    image_size: message.image_size,
+  });
 }
 
 async function syncOutboxOnce() {
@@ -2452,6 +2596,16 @@ async function syncOutboxOnce() {
       }
     } catch (err) {
       const nextErr = String(err);
+      emitClientDiagnostic(
+        "send_failed",
+        {
+          client_msg_id: item.client_msg_id,
+          sender_role: item.sender_role,
+          has_image: Boolean(item.image_url),
+          error: nextErr,
+        },
+        { throttleKey: `send_failed:${String(item.client_msg_id || item.id || "")}` }
+      );
       if (item.status !== "failed" || item.error !== nextErr) {
         item.status = "failed";
         item.error = nextErr;
@@ -2669,12 +2823,14 @@ async function deleteMessage(messageId) {
         "Delete RPC is not deployed yet. Run the new SQL function migration, then retry."
       );
     }
+    pushDebugEvent("error", "Delete RPC failed", String(error?.message || error));
     throw new Error(error.message);
   }
 
   const sid = String(messageId);
   state.messages = state.messages.filter((m) => String(m.id) !== sid);
   persistMessagesCache(state.messages);
+  pushDebugEvent("info", "Message deleted", sid);
 }
 
 function startOutboxSyncLoop() {
@@ -2682,11 +2838,13 @@ function startOutboxSyncLoop() {
   setInterval(async () => {
     try {
       const changed = await syncOutboxWithLock();
+      state.lastOutboxOkAt = Date.now();
       if (changed && !state.authRequired && !isUserEditingControl()) {
         render();
       }
     } catch (err) {
       console.warn("Outbox sync loop failed", err);
+      emitClientDiagnostic("outbox_loop_failed", { error: String(err?.message || err) });
     }
   }, ms);
 }
@@ -2706,6 +2864,7 @@ function startMessageRefreshLoop() {
       await emitAppVersionHeartbeat(false);
       await loadVersionStatus(false);
       handleInboundAlerts(beforeMessages, state.messages);
+      state.lastRefreshOkAt = Date.now();
       const afterSig = appStateSignature();
       const messagesChanged =
         messagesSignature(beforeMessages) !== messagesSignature(state.messages);
@@ -2714,10 +2873,41 @@ function startMessageRefreshLoop() {
       }
     } catch (err) {
       console.warn("Message refresh loop failed", err);
+      emitClientDiagnostic("refresh_loop_failed", { error: String(err?.message || err) });
     } finally {
       state.refreshInFlight = false;
     }
   }, ms);
+}
+
+function setupClientWatchdog() {
+  setInterval(async () => {
+    if (!supabase || !state.session || state.authRequired || !state.conversationId) return;
+    const now = Date.now();
+    const refreshStalled = now - Number(state.lastRefreshOkAt || 0) > CLIENT_REFRESH_STALL_MS;
+    if (refreshStalled) {
+      await emitClientDiagnostic(
+        "watchdog_refresh_stall",
+        { stalled_ms: now - Number(state.lastRefreshOkAt || 0) },
+        { force: true, throttleKey: "watchdog_refresh_stall" }
+      );
+      await recoverClientPipeline("refresh_stall");
+      return;
+    }
+    const outboxStalled =
+      Number(state.outbox?.length || 0) > 0 && now - Number(state.lastOutboxOkAt || 0) > CLIENT_REFRESH_STALL_MS;
+    if (outboxStalled) {
+      await emitClientDiagnostic(
+        "watchdog_outbox_stall",
+        {
+          stalled_ms: now - Number(state.lastOutboxOkAt || 0),
+          outbox_count: Number(state.outbox?.length || 0),
+        },
+        { force: true, throttleKey: "watchdog_outbox_stall" }
+      );
+      await syncOutboxWithLock();
+    }
+  }, CLIENT_WATCHDOG_MS);
 }
 
 async function emitAppVersionHeartbeat(force = false) {
@@ -2809,6 +2999,87 @@ function updateAppTitle() {
   const text = isDadSurface ? "Tony Chat" : "Care Chat";
   appTitle.textContent = text;
   document.title = text;
+}
+
+function diagnosticSummaryText(viewerRole) {
+  const role = String(viewerRole || state.role || "");
+  const permission = typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+  const session = state.session ? "yes" : "no";
+  const conv = state.conversationId ? String(state.conversationId).slice(0, 8) : "none";
+  const refresh = state.refreshInFlight ? "busy" : "idle";
+  const outbox = `${state.outbox?.length || 0} (${state.outboxSyncInFlight ? "syncing" : "idle"})`;
+  const dadSeen = state.dadLastPresenceAt ? formatTime(state.dadLastPresenceAt) : "n/a";
+  return [
+    `view=${role}`,
+    `session=${session}`,
+    `conversation=${conv}`,
+    `outbox=${outbox}`,
+    `refresh=${refresh}`,
+    `pushPerm=${permission}`,
+    `pushSubscribed=${state.pushSubscribed ? "yes" : "no"}`,
+    `dadOnline=${state.dadOnline ? "yes" : "no"}@${dadSeen}`,
+  ].join(" | ");
+}
+
+function buildDiagnosticsDump(viewerRole) {
+  const lines = [];
+  lines.push(`Time: ${new Date().toISOString()}`);
+  lines.push(`Version: ${APP_VERSION}`);
+  lines.push(`Summary: ${diagnosticSummaryText(viewerRole)}`);
+  lines.push("");
+  lines.push("Recent events:");
+  const events = Array.isArray(state.debugEvents) ? state.debugEvents.slice(-20) : [];
+  if (!events.length) lines.push("(none)");
+  else lines.push(...events);
+  return lines.join("\n");
+}
+
+async function copyDiagnosticsToClipboard(viewerRole) {
+  const text = buildDiagnosticsDump(viewerRole);
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* fallback */
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch {
+    ok = false;
+  }
+  ta.remove();
+  return ok;
+}
+
+function wireDiagnosticsPanel(root, viewerRole) {
+  if (!root) return;
+  const prefix = viewerRole === "dad" ? "dad" : "caregiver";
+  const summaryEl = root.getElementById(`${prefix}DiagSummary`);
+  const logEl = root.getElementById(`${prefix}DiagLog`);
+  const copyBtn = root.getElementById(`${prefix}CopyDiagnostics`);
+  if (summaryEl) summaryEl.textContent = diagnosticSummaryText(viewerRole);
+  if (logEl) {
+    const events = Array.isArray(state.debugEvents) ? state.debugEvents.slice(-20) : [];
+    logEl.textContent = events.length ? events.join("\n") : "No warnings/errors captured yet.";
+  }
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      const ok = await copyDiagnosticsToClipboard(viewerRole);
+      copyBtn.textContent = ok ? "Copied" : "Copy failed";
+      setTimeout(() => {
+        copyBtn.textContent = "Copy diagnostics";
+      }, 1200);
+    });
+  }
 }
 
 function isUserEditingControl() {
@@ -3198,6 +3469,17 @@ function formatTime(iso) {
   const dt = new Date(iso);
   if (!Number.isFinite(dt.getTime())) return "unknown";
   return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatMessageTime(iso) {
+  const dt = new Date(iso);
+  if (!Number.isFinite(dt.getTime())) return "unknown";
+  return dt.toLocaleString("en-US", {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
 }
 
 function truncate(value, n) {

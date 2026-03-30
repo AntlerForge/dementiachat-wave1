@@ -30,6 +30,16 @@
           <input id="dadInput" autocomplete="off" placeholder="Type message..." />
           <button type="submit">Send</button>
         </form>
+        <section class="diagnostics">
+          <details>
+            <summary>Diagnostics</summary>
+            <p id="dadDiagSummary" class="status"></p>
+            <pre id="dadDiagLog" class="diag-log"></pre>
+            <div class="diag-actions">
+              <button id="dadCopyDiagnostics" type="button">Copy diagnostics</button>
+            </div>
+          </details>
+        </section>
       </section>
     </template>
 
@@ -79,6 +89,16 @@
             </div>
           </div>
           <div id="outboxStatus" class="status"></div>
+          <section class="diagnostics">
+            <details>
+              <summary>Diagnostics</summary>
+              <p id="caregiverDiagSummary" class="status"></p>
+              <pre id="caregiverDiagLog" class="diag-log"></pre>
+              <div class="diag-actions">
+                <button id="caregiverCopyDiagnostics" type="button">Copy diagnostics</button>
+              </div>
+            </details>
+          </section>
         </section>
 
         <section data-pane="dad-ui" class="pane">

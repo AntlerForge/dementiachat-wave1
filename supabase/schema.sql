@@ -142,6 +142,9 @@ create table if not exists activity_events (
   created_at timestamptz not null default now()
 );
 
+create index if not exists idx_activity_events_diag_window
+  on activity_events(conversation_id, event_type, created_at desc);
+
 create table if not exists push_subscriptions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references profiles(id) on delete cascade,
