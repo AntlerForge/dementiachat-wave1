@@ -24,7 +24,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-26.14";
+const APP_VERSION = "wave1-2026-03-31.15";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -40,6 +40,7 @@ let realtimeRefreshInFlight = false;
 let realtimeRefreshQueued = false;
 let dadAutoSnapTimer = null;
 let outboxSyncPromise = null;
+let ensureConversationPromise = null;
 let dadFallbackPopupEl = null;
 let dadAttentionTitleTimer = null;
 let dadAttentionTitleFlip = false;
@@ -60,12 +61,16 @@ function parseMsWithDefault(value, fallback) {
 }
 
 const SUPABASE_FETCH_TIMEOUT_MS = Math.min(
-  300_000,
-  Math.max(45_000, parseMsWithDefault(config.SUPABASE_FETCH_TIMEOUT_MS, 180_000))
+  120_000,
+  Math.max(30_000, parseMsWithDefault(config.SUPABASE_FETCH_TIMEOUT_MS, 60_000))
 );
 const SEND_OPERATION_TIMEOUT_MS = Math.max(
   8_000,
   parseMsWithDefault(config.SEND_OPERATION_TIMEOUT_MS, 15_000)
+);
+const REFRESH_STEP_TIMEOUT_MS = Math.max(
+  5_000,
+  parseMsWithDefault(config.REFRESH_STEP_TIMEOUT_MS, 12_000)
 );
 const APP_UPDATE_CHECK_MS = Math.max(60_000, parseMsWithDefault(config.APP_UPDATE_CHECK_MS, 300_000));
 const APP_UPDATE_IDLE_RELOAD_MS = Math.max(
@@ -499,57 +504,77 @@ function getSharedConversationId() {
  */
 async function ensureConversation() {
   if (!supabase) return;
+  if (ensureConversationPromise) return ensureConversationPromise;
 
-  const shared = getSharedConversationId();
+  ensureConversationPromise = (async () => {
+    const shared = getSharedConversationId();
 
-  if (shared) {
-    const prev = String(state.conversationId || localStorage.getItem(CONVERSATION_KEY) || "");
-    if (prev && prev !== shared) {
-      try {
-        localStorage.removeItem(LOCAL_MSG_KEY);
-        localStorage.setItem(OUTBOX_KEY, JSON.stringify([]));
-      } catch {
-        /* noop */
+    if (shared) {
+      const prev = String(state.conversationId || localStorage.getItem(CONVERSATION_KEY) || "");
+      if (prev && prev !== shared) {
+        try {
+          localStorage.removeItem(LOCAL_MSG_KEY);
+          localStorage.setItem(OUTBOX_KEY, JSON.stringify([]));
+        } catch {
+          /* noop */
+        }
+        state.messages = [];
+        state.outbox = [];
       }
-      state.messages = [];
-      state.outbox = [];
-    }
-    state.conversationId = shared;
-    const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
-    const { error: joinErr } = await supabase.rpc("create_or_join_conversation", {
-      p_conversation_id: state.conversationId,
-      p_member_role: joinRole,
-    });
-    if (joinErr) {
-      throw new Error(`Join shared conversation failed: ${joinErr.message}`);
-    }
-    localStorage.setItem(CONVERSATION_KEY, state.conversationId);
-    return;
-  }
-
-  if (!state.conversationId) {
-    state.conversationId = localStorage.getItem(CONVERSATION_KEY) || null;
-  }
-  if (state.conversationId) {
-    const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
-    const { error: joinErr } = await supabase.rpc("create_or_join_conversation", {
-      p_conversation_id: state.conversationId,
-      p_member_role: joinRole,
-    });
-    if (!joinErr) {
+      state.conversationId = shared;
+      const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
+      const { error: joinErr } = await withTimeout(
+        supabase.rpc("create_or_join_conversation", {
+          p_conversation_id: state.conversationId,
+          p_member_role: joinRole,
+        }),
+        REFRESH_STEP_TIMEOUT_MS,
+        "Join shared conversation"
+      );
+      if (joinErr) {
+        throw new Error(`Join shared conversation failed: ${joinErr.message}`);
+      }
       localStorage.setItem(CONVERSATION_KEY, state.conversationId);
       return;
     }
-    console.warn("Re-join existing conversation failed, creating new.", joinErr);
+
+    if (!state.conversationId) {
+      state.conversationId = localStorage.getItem(CONVERSATION_KEY) || null;
+    }
+    if (state.conversationId) {
+      const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
+      const { error: joinErr } = await withTimeout(
+        supabase.rpc("create_or_join_conversation", {
+          p_conversation_id: state.conversationId,
+          p_member_role: joinRole,
+        }),
+        REFRESH_STEP_TIMEOUT_MS,
+        "Re-join conversation"
+      );
+      if (!joinErr) {
+        localStorage.setItem(CONVERSATION_KEY, state.conversationId);
+        return;
+      }
+      console.warn("Re-join existing conversation failed, creating new.", joinErr);
+    }
+    const memberRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
+    const { data, error } = await withTimeout(
+      supabase.rpc("create_or_join_conversation", {
+        p_conversation_id: null,
+        p_member_role: memberRole,
+      }),
+      REFRESH_STEP_TIMEOUT_MS,
+      "Create conversation"
+    );
+    if (error) throw new Error(`create_or_join_conversation failed: ${error.message}`);
+    state.conversationId = data;
+    localStorage.setItem(CONVERSATION_KEY, state.conversationId);
+  })();
+  try {
+    return await ensureConversationPromise;
+  } finally {
+    ensureConversationPromise = null;
   }
-  const memberRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
-  const { data, error } = await supabase.rpc("create_or_join_conversation", {
-    p_conversation_id: null,
-    p_member_role: memberRole,
-  });
-  if (error) throw new Error(`create_or_join_conversation failed: ${error.message}`);
-  state.conversationId = data;
-  localStorage.setItem(CONVERSATION_KEY, state.conversationId);
 }
 
 async function loadRemoteSettings() {
@@ -2076,6 +2101,11 @@ async function emitPresenceHeartbeat(force = false) {
     });
   } catch (err) {
     console.warn("presence heartbeat failed", err);
+    emitClientDiagnostic(
+      "presence_emit_failed",
+      { error: String(err?.message || err) },
+      { throttleKey: "presence_emit_failed" }
+    );
   }
 }
 
@@ -2310,20 +2340,25 @@ async function loadDadOnlineStatus(force = false) {
       .from("activity_events")
       .select("created_at")
       .eq("conversation_id", state.conversationId)
-      .in("event_type", ["presence_ping", "app_version"])
+      .in("event_type", ["presence_ping", "app_version", "client_diag"])
       .eq("payload->>role", "dad")
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    if (error || !data?.created_at) {
-      state.dadOnline = false;
+    if (error) {
+      // Keep last known status on transient query failures.
+      if (!state.dadLastPresenceAt) state.dadOnline = false;
+      return;
+    }
+    if (!data?.created_at) {
+      if (!state.dadLastPresenceAt) state.dadOnline = false;
       return;
     }
     state.dadLastPresenceAt = String(data.created_at || "");
     const ageMs = Date.now() - new Date(state.dadLastPresenceAt).getTime();
     state.dadOnline = Number.isFinite(ageMs) && ageMs <= DAD_ONLINE_WINDOW_MS;
   } catch {
-    state.dadOnline = false;
+    if (!state.dadLastPresenceAt) state.dadOnline = false;
     emitClientDiagnostic("presence_load_failed", {}, { throttleKey: "presence_load_failed" });
   }
 }
@@ -2425,7 +2460,7 @@ function mergeFetchedMessagesWithRecentLocal(fetchedRows) {
 }
 
 async function loadMessages() {
-  if (supabase && state.session) {
+  if (supabase && state.session && !state.conversationId) {
     await ensureConversation();
   }
   if (supabase) {
@@ -2741,10 +2776,14 @@ async function loadExistingMessageByClientMsgId(conversationId, clientMsgId) {
 async function ensureConversationMembership(conversationId) {
   if (!supabase || !conversationId) return;
   const joinRole = state.roleHint === "dad" ? "dad" : "caregiver_admin";
-  const { error } = await supabase.rpc("create_or_join_conversation", {
-    p_conversation_id: conversationId,
-    p_member_role: joinRole,
-  });
+  const { error } = await withTimeout(
+    supabase.rpc("create_or_join_conversation", {
+      p_conversation_id: conversationId,
+      p_member_role: joinRole,
+    }),
+    REFRESH_STEP_TIMEOUT_MS,
+    "Repair conversation membership"
+  );
   if (error) {
     throw new Error(`Membership repair failed: ${error.message}`);
   }
@@ -2858,11 +2897,30 @@ function startMessageRefreshLoop() {
     try {
       const beforeSig = appStateSignature();
       const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
-      await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus(), loadDadOnlineStatus()]);
-      await maybeEnsureDadPushSubscription(false);
-      await emitPresenceHeartbeat(false);
-      await emitAppVersionHeartbeat(false);
-      await loadVersionStatus(false);
+      await withTimeout(loadMessages(), REFRESH_STEP_TIMEOUT_MS, "Load messages");
+      const backgroundTasks = await Promise.allSettled([
+        withTimeout(loadRemoteSettings(), REFRESH_STEP_TIMEOUT_MS, "Load settings"),
+        withTimeout(loadDadTypingStatus(), REFRESH_STEP_TIMEOUT_MS, "Load typing"),
+        withTimeout(loadDadOnlineStatus(), REFRESH_STEP_TIMEOUT_MS, "Load online status"),
+        withTimeout(emitPresenceHeartbeat(false), REFRESH_STEP_TIMEOUT_MS, "Emit presence"),
+        withTimeout(emitAppVersionHeartbeat(false), REFRESH_STEP_TIMEOUT_MS, "Emit app version"),
+        withTimeout(loadVersionStatus(false), REFRESH_STEP_TIMEOUT_MS, "Load version status"),
+      ]);
+      // Push subscription retries can be slow/noisy on some Windows Edge setups; don't block refresh.
+      maybeEnsureDadPushSubscription(false).catch((err) => {
+        emitClientDiagnostic("push_subscribe_failed", { error: String(err?.message || err) });
+      });
+      const refreshErrors = backgroundTasks
+        .filter((entry) => entry.status === "rejected")
+        .map((entry) => String(entry.reason?.message || entry.reason))
+        .filter(Boolean);
+      if (refreshErrors.length) {
+        emitClientDiagnostic(
+          "refresh_partial_failed",
+          { errors: refreshErrors.slice(0, 3) },
+          { throttleKey: "refresh_partial_failed" }
+        );
+      }
       handleInboundAlerts(beforeMessages, state.messages);
       state.lastRefreshOkAt = Date.now();
       const afterSig = appStateSignature();
