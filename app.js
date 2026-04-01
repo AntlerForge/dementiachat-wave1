@@ -24,7 +24,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-03-31.15";
+const APP_VERSION = "wave1-2026-04-01.16";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -41,6 +41,9 @@ let realtimeRefreshQueued = false;
 let dadAutoSnapTimer = null;
 let outboxSyncPromise = null;
 let ensureConversationPromise = null;
+let bootstrapRemotePromise = null;
+let pendingAuthSync = null;
+let authSyncScheduled = false;
 let dadFallbackPopupEl = null;
 let dadAttentionTitleTimer = null;
 let dadAttentionTitleFlip = false;
@@ -71,6 +74,11 @@ const SEND_OPERATION_TIMEOUT_MS = Math.max(
 const REFRESH_STEP_TIMEOUT_MS = Math.max(
   5_000,
   parseMsWithDefault(config.REFRESH_STEP_TIMEOUT_MS, 12_000)
+);
+const MESSAGE_FETCH_LIMIT = Math.max(40, parseMsWithDefault(config.MESSAGE_FETCH_LIMIT, 200));
+const LIGHTWEIGHT_MESSAGE_FETCH_LIMIT = Math.max(
+  20,
+  parseMsWithDefault(config.LIGHTWEIGHT_MESSAGE_FETCH_LIMIT, 80)
 );
 const APP_UPDATE_CHECK_MS = Math.max(60_000, parseMsWithDefault(config.APP_UPDATE_CHECK_MS, 300_000));
 const APP_UPDATE_IDLE_RELOAD_MS = Math.max(
@@ -263,6 +271,8 @@ const state = {
   lastRefreshOkAt: Date.now(),
   lastOutboxOkAt: Date.now(),
   recoveringClient: false,
+  refreshLoadTimeoutStreak: 0,
+  lightweightLoadModeUntil: 0,
   lastVersionEmitAt: 0,
   lastVersionFetchAt: 0,
   lastPresenceEmitAt: 0,
@@ -359,6 +369,41 @@ async function recoverClientPipeline(reason) {
   }
 }
 
+async function bootstrapRemoteWithLock() {
+  if (!supabase) return;
+  if (bootstrapRemotePromise) return bootstrapRemotePromise;
+  bootstrapRemotePromise = (async () => {
+    try {
+      await bootstrapRemote();
+    } finally {
+      bootstrapRemotePromise = null;
+    }
+  })();
+  return bootstrapRemotePromise;
+}
+
+function scheduleAuthStateSync(evt, session) {
+  pendingAuthSync = { evt, session };
+  if (authSyncScheduled) return;
+  authSyncScheduled = true;
+  setTimeout(async () => {
+    authSyncScheduled = false;
+    while (pendingAuthSync) {
+      const next = pendingAuthSync;
+      pendingAuthSync = null;
+      try {
+        state.authDebug.lastEvent = String(next?.evt || "");
+        state.session = next?.session || null;
+        await bootstrapRemoteWithLock();
+        render();
+      } catch (err) {
+        console.error("Auth state update failed", err);
+        showFatalStartupError(err);
+      }
+    }
+  }, 0);
+}
+
 init().catch((err) => {
   console.error(err);
   showFatalStartupError(err);
@@ -371,20 +416,24 @@ async function init() {
   if (supabase) {
     await processAuthCallbackIfPresent();
     await hydrateAuth();
-    supabase.auth.onAuthStateChange(async (evt, session) => {
-      try {
-        state.authDebug.lastEvent = evt;
-        state.session = session;
-        await bootstrapRemote();
-        render();
-      } catch (err) {
-        console.error("Auth state update failed", err);
-        showFatalStartupError(err);
-      }
+    // Keep callback sync-safe: Supabase warns async awaits here can deadlock other client calls.
+    supabase.auth.onAuthStateChange((evt, session) => {
+      scheduleAuthStateSync(evt, session);
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      if (!state.session) return;
+      bootstrapRemoteWithLock()
+        .then(() => {
+          render();
+        })
+        .catch((err) => {
+          emitClientDiagnostic("visibility_resync_failed", { error: String(err?.message || err) });
+        });
     });
   }
   try {
-    await bootstrapRemote();
+    await bootstrapRemoteWithLock();
     enforceRoleLock();
     await loadMessages();
     primeInboundMessageMarkers();
@@ -934,7 +983,7 @@ function renderAuthGate() {
       state.authDebug.lastEvent = "SIGNED_IN";
       localStorage.setItem(AUTH_CODE_KEY, "");
       state.authCodeDraft = "";
-      await bootstrapRemote();
+      await bootstrapRemoteWithLock();
       status.textContent = "Signed in successfully.";
       render();
     } catch (err) {
@@ -2459,7 +2508,26 @@ function mergeFetchedMessagesWithRecentLocal(fetchedRows) {
   return merged.slice(-240);
 }
 
-async function loadMessages() {
+function mergeMissingImageUrlsFromCache(rows) {
+  if (!Array.isArray(rows) || !rows.length) return rows;
+  const cachedById = new Map();
+  for (const msg of Array.isArray(state.messages) ? state.messages : []) {
+    const id = String(msg?.id || "");
+    if (!id) continue;
+    if (typeof msg?.image_url === "string" && msg.image_url) {
+      cachedById.set(id, msg.image_url);
+    }
+  }
+  return rows.map((row) => {
+    if (!row || row.image_url) return row;
+    const id = String(row.id || "");
+    const cachedImage = id ? cachedById.get(id) : "";
+    return cachedImage ? { ...row, image_url: cachedImage } : row;
+  });
+}
+
+async function loadMessages(options = {}) {
+  const lightweight = Boolean(options?.lightweight);
   if (supabase && state.session && !state.conversationId) {
     await ensureConversation();
   }
@@ -2470,12 +2538,16 @@ async function loadMessages() {
     }
     // Newest first + limit, then reverse for display. Ascending + limit(200) only returned the
     // *oldest* 200 rows — new messages vanished from the UI while push still saw them in the DB.
+    const selectColumns = lightweight
+      ? "id,client_msg_id,conversation_id,sender_role,content,image_size,hidden_for_dad,created_at,updated_at"
+      : "*";
+    const fetchLimit = lightweight ? LIGHTWEIGHT_MESSAGE_FETCH_LIMIT : MESSAGE_FETCH_LIMIT;
     const { data, error } = await supabase
       .from("messages")
-      .select("*")
+      .select(selectColumns)
       .eq("conversation_id", state.conversationId)
       .order("created_at", { ascending: false })
-      .limit(200);
+      .limit(fetchLimit);
 
     if (error) {
       // Never replace live state with disk cache on failure — carechat.local_messages can lag
@@ -2497,7 +2569,10 @@ async function loadMessages() {
       return;
     }
 
-    const rows = Array.isArray(data) ? data : [];
+    let rows = Array.isArray(data) ? data : [];
+    if (lightweight) {
+      rows = mergeMissingImageUrlsFromCache(rows);
+    }
     state.messages = mergeFetchedMessagesWithRecentLocal(rows);
     persistMessagesCache(state.messages);
     return;
@@ -2897,7 +2972,13 @@ function startMessageRefreshLoop() {
     try {
       const beforeSig = appStateSignature();
       const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
-      await withTimeout(loadMessages(), REFRESH_STEP_TIMEOUT_MS, "Load messages");
+      const lightweight = Date.now() < Number(state.lightweightLoadModeUntil || 0);
+      await withTimeout(
+        loadMessages({ lightweight }),
+        REFRESH_STEP_TIMEOUT_MS,
+        lightweight ? "Load messages (lightweight)" : "Load messages"
+      );
+      state.refreshLoadTimeoutStreak = 0;
       const backgroundTasks = await Promise.allSettled([
         withTimeout(loadRemoteSettings(), REFRESH_STEP_TIMEOUT_MS, "Load settings"),
         withTimeout(loadDadTypingStatus(), REFRESH_STEP_TIMEOUT_MS, "Load typing"),
@@ -2931,6 +3012,29 @@ function startMessageRefreshLoop() {
       }
     } catch (err) {
       console.warn("Message refresh loop failed", err);
+      const msg = String(err?.message || err || "");
+      if (msg.includes("Load messages timed out")) {
+        state.refreshLoadTimeoutStreak = Number(state.refreshLoadTimeoutStreak || 0) + 1;
+        if (state.refreshLoadTimeoutStreak >= 3) {
+          state.lightweightLoadModeUntil = Date.now() + 10 * 60_000;
+          emitClientDiagnostic(
+            "messages_load_degraded",
+            { timeout_streak: state.refreshLoadTimeoutStreak, mode_for_ms: 10 * 60_000 },
+            { throttleKey: "messages_load_degraded" }
+          );
+          // Try a lightweight one-shot recover immediately.
+          loadMessages({ lightweight: true })
+            .then(() => {
+              state.lastRefreshOkAt = Date.now();
+              if (!isUserEditingControl()) render();
+            })
+            .catch(() => {
+              // noop
+            });
+        }
+      } else {
+        state.refreshLoadTimeoutStreak = 0;
+      }
       emitClientDiagnostic("refresh_loop_failed", { error: String(err?.message || err) });
     } finally {
       state.refreshInFlight = false;
