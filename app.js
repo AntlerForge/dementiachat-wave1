@@ -24,7 +24,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-01.16";
+const APP_VERSION = "wave1-2026-04-02.17";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -89,8 +89,28 @@ const RUNTIME_VERSION_CHECK_MS = Math.max(
   10_000,
   parseMsWithDefault(config.RUNTIME_VERSION_CHECK_MS, 30_000)
 );
-const PRESENCE_HEARTBEAT_MS = Math.max(10_000, parseMsWithDefault(config.PRESENCE_HEARTBEAT_MS, 20_000));
-const DAD_ONLINE_WINDOW_MS = Math.max(30_000, parseMsWithDefault(config.DAD_ONLINE_WINDOW_MS, 90_000));
+const PRESENCE_HEARTBEAT_MS = Math.max(15_000, parseMsWithDefault(config.PRESENCE_HEARTBEAT_MS, 45_000));
+const DAD_ONLINE_WINDOW_MS = Math.max(60_000, parseMsWithDefault(config.DAD_ONLINE_WINDOW_MS, 180_000));
+const MESSAGE_POLL_ACTIVE_MS = Math.max(
+  3_000,
+  parseMsWithDefault(config.MESSAGE_POLL_MS, 7_000)
+);
+const MESSAGE_POLL_IDLE_MS = Math.max(
+  MESSAGE_POLL_ACTIVE_MS,
+  parseMsWithDefault(config.MESSAGE_POLL_IDLE_MS, 15_000)
+);
+const MESSAGE_POLL_MAX_MS = Math.max(
+  MESSAGE_POLL_IDLE_MS,
+  parseMsWithDefault(config.MESSAGE_POLL_MAX_MS, 30_000)
+);
+const REMOTE_SETTINGS_POLL_MS = Math.max(
+  10_000,
+  parseMsWithDefault(config.REMOTE_SETTINGS_POLL_MS, 60_000)
+);
+const DAD_TYPING_POLL_MS = Math.max(
+  2_000,
+  parseMsWithDefault(config.DAD_TYPING_POLL_MS, 5_000)
+);
 const DAD_ALERT_PROMPT_RETRY_MS = Math.max(
   10 * 60_000,
   parseMsWithDefault(config.DAD_ALERT_PROMPT_RETRY_MS, 12 * 60 * 60_000)
@@ -276,6 +296,8 @@ const state = {
   lastVersionEmitAt: 0,
   lastVersionFetchAt: 0,
   lastPresenceEmitAt: 0,
+  lastRemoteSettingsFetchAt: 0,
+  lastDadTypingFetchAt: 0,
 };
 
 function pushDebugEvent(level, message, details = "") {
@@ -354,7 +376,7 @@ async function recoverClientPipeline(reason) {
     await emitClientDiagnostic("recover_start", { reason }, { force: true, throttleKey: "recover" });
     await syncMessagesRealtimeSubscription();
     await loadMessages();
-    await loadRemoteSettings();
+    await loadRemoteSettings(true);
     state.lastRefreshOkAt = Date.now();
     render();
     await emitClientDiagnostic("recover_ok", { reason }, { force: true, throttleKey: "recover_ok" });
@@ -523,7 +545,7 @@ async function bootstrapRemote() {
   await ensureProfile();
   await ensureConversation();
   await syncMessagesRealtimeSubscription();
-  await loadRemoteSettings();
+  await loadRemoteSettings(true);
   await emitPresenceHeartbeat(true);
   await loadDadOnlineStatus(true);
   await emitAppVersionHeartbeat(true);
@@ -626,8 +648,11 @@ async function ensureConversation() {
   }
 }
 
-async function loadRemoteSettings() {
+async function loadRemoteSettings(force = false) {
   if (!supabase || !state.conversationId) return;
+  const now = Date.now();
+  if (!force && now - Number(state.lastRemoteSettingsFetchAt || 0) < REMOTE_SETTINGS_POLL_MS) return;
+  state.lastRemoteSettingsFetchAt = now;
 
   const [{ data: uiData }, { data: trustData }] = await Promise.all([
     supabase
@@ -725,7 +750,7 @@ async function runRealtimeRefresh() {
   try {
     const beforeSig = appStateSignature();
     const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
-    await Promise.all([loadMessages(), loadRemoteSettings()]);
+    await Promise.all([loadMessages(), loadRemoteSettings(false)]);
     handleInboundAlerts(beforeMessages, state.messages);
     const afterSig = appStateSignature();
     if (beforeSig !== afterSig && !isUserEditingControl()) {
@@ -1322,7 +1347,7 @@ function wireCaregiverPullRefresh(threadEl, statusEl) {
     setIndicator("Refreshing...", true);
     threadEl.style.transform = "translateY(34px)";
     try {
-      await Promise.all([loadMessages(), loadRemoteSettings(), loadDadTypingStatus()]);
+      await Promise.all([loadMessages(), loadRemoteSettings(true), loadDadTypingStatus(true)]);
       if (statusEl) statusEl.textContent = "Refreshed.";
     } catch (err) {
       if (statusEl) statusEl.textContent = `Refresh failed: ${String(err?.message || err)}`;
@@ -2359,8 +2384,11 @@ function updateDadAttentionSignals() {
   updateAppTitle();
 }
 
-async function loadDadTypingStatus() {
+async function loadDadTypingStatus(force = false) {
   if (!supabase || !state.session || !state.conversationId || state.role !== "caregiver") return;
+  const now = Date.now();
+  if (!force && now - Number(state.lastDadTypingFetchAt || 0) < DAD_TYPING_POLL_MS) return;
+  state.lastDadTypingFetchAt = now;
   const { data, error } = await supabase
     .from("activity_events")
     .select("payload, created_at")
@@ -2964,10 +2992,26 @@ function startOutboxSyncLoop() {
 }
 
 function startMessageRefreshLoop() {
-  const ms = Number(config.MESSAGE_POLL_MS || 2500);
-  setInterval(async () => {
-    if (!supabase || !state.session || state.authRequired) return;
-    if (state.refreshInFlight) return;
+  let nextDelayMs = MESSAGE_POLL_ACTIVE_MS;
+  const scheduleNext = () => {
+    setTimeout(runTick, nextDelayMs);
+  };
+  const runTick = async () => {
+    const appActive =
+      document.visibilityState === "visible" && typeof document.hasFocus === "function"
+        ? document.hasFocus()
+        : document.visibilityState === "visible";
+    const baselineMs = appActive ? MESSAGE_POLL_ACTIVE_MS : MESSAGE_POLL_IDLE_MS;
+    if (!supabase || !state.session || state.authRequired) {
+      nextDelayMs = baselineMs;
+      scheduleNext();
+      return;
+    }
+    if (state.refreshInFlight) {
+      nextDelayMs = Math.min(MESSAGE_POLL_MAX_MS, Math.max(baselineMs, Math.round(nextDelayMs * 1.1)));
+      scheduleNext();
+      return;
+    }
     state.refreshInFlight = true;
     try {
       const beforeSig = appStateSignature();
@@ -2980,8 +3024,8 @@ function startMessageRefreshLoop() {
       );
       state.refreshLoadTimeoutStreak = 0;
       const backgroundTasks = await Promise.allSettled([
-        withTimeout(loadRemoteSettings(), REFRESH_STEP_TIMEOUT_MS, "Load settings"),
-        withTimeout(loadDadTypingStatus(), REFRESH_STEP_TIMEOUT_MS, "Load typing"),
+        withTimeout(loadRemoteSettings(false), REFRESH_STEP_TIMEOUT_MS, "Load settings"),
+        withTimeout(loadDadTypingStatus(false), REFRESH_STEP_TIMEOUT_MS, "Load typing"),
         withTimeout(loadDadOnlineStatus(), REFRESH_STEP_TIMEOUT_MS, "Load online status"),
         withTimeout(emitPresenceHeartbeat(false), REFRESH_STEP_TIMEOUT_MS, "Emit presence"),
         withTimeout(emitAppVersionHeartbeat(false), REFRESH_STEP_TIMEOUT_MS, "Emit app version"),
@@ -3009,6 +3053,12 @@ function startMessageRefreshLoop() {
         messagesSignature(beforeMessages) !== messagesSignature(state.messages);
       if (beforeSig !== afterSig && (!isUserEditingControl() || messagesChanged)) {
         render();
+        nextDelayMs = baselineMs;
+      } else {
+        nextDelayMs = Math.min(
+          MESSAGE_POLL_MAX_MS,
+          Math.max(baselineMs, Math.round(nextDelayMs * 1.2))
+        );
       }
     } catch (err) {
       console.warn("Message refresh loop failed", err);
@@ -3035,11 +3085,17 @@ function startMessageRefreshLoop() {
       } else {
         state.refreshLoadTimeoutStreak = 0;
       }
+      nextDelayMs = Math.min(
+        MESSAGE_POLL_MAX_MS,
+        Math.max(baselineMs, Math.round(nextDelayMs * 1.5))
+      );
       emitClientDiagnostic("refresh_loop_failed", { error: String(err?.message || err) });
     } finally {
       state.refreshInFlight = false;
+      scheduleNext();
     }
-  }, ms);
+  };
+  scheduleNext();
 }
 
 function setupClientWatchdog() {

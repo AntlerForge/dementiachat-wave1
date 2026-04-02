@@ -32,7 +32,13 @@ window.APP_CONFIG = {
   // APP_UPDATE_IDLE_RELOAD_MS: 60000,
   // Runtime version-manifest checks while app is open/focused (default 30s).
   // RUNTIME_VERSION_CHECK_MS: 30000,
-  // Dad presence status in caregiver header (defaults: 20s heartbeat, 90s online window).
-  // PRESENCE_HEARTBEAT_MS: 20000,
-  // DAD_ONLINE_WINDOW_MS: 90000,
+  // Dad presence status in caregiver header (defaults: 45s heartbeat, 180s online window).
+  // PRESENCE_HEARTBEAT_MS: 45000,
+  // DAD_ONLINE_WINDOW_MS: 180000,
+  // Polling cadence knobs to reduce Disk IO (realtime still handles instant updates).
+  // MESSAGE_POLL_MS: 7000,
+  // MESSAGE_POLL_IDLE_MS: 15000,
+  // MESSAGE_POLL_MAX_MS: 30000,
+  // REMOTE_SETTINGS_POLL_MS: 60000,
+  // DAD_TYPING_POLL_MS: 5000,
 };
