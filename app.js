@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.19";
+const APP_VERSION = "wave1-2026-04-02.20";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -344,6 +344,7 @@ const state = {
   lastInfoBoardFetchAt: 0,
   infoBoardSaveTimer: null,
   infoBoardSaveInFlight: false,
+  infoBoardDirty: false,
 };
 state.infoBoard = normalizeInfoBoardState(state.infoBoard);
 
@@ -814,6 +815,7 @@ function persistInformationBoard() {
 
 async function loadInformationBoard(force = false) {
   if (!supabase || !state.conversationId) return;
+  if (state.infoBoardDirty && !force) return;
   const now = Date.now();
   if (!force && now - Number(state.lastInfoBoardFetchAt || 0) < INFO_BOARD_POLL_MS) return;
   state.lastInfoBoardFetchAt = now;
@@ -859,6 +861,7 @@ async function saveInformationBoardNow() {
       state.infoBoard = normalizeInfoBoardState(data);
       persistInformationBoard();
     }
+    state.infoBoardDirty = false;
     state.infoBoardStatus = `Saved ${formatTime(new Date().toISOString())}`;
   } catch (err) {
     state.infoBoardStatus = `Save failed: ${String(err?.message || err)}`;
@@ -869,6 +872,7 @@ async function saveInformationBoardNow() {
 }
 
 function scheduleInformationBoardSave() {
+  state.infoBoardDirty = true;
   persistInformationBoard();
   if (state.infoBoardSaveTimer) {
     clearTimeout(state.infoBoardSaveTimer);
@@ -2481,6 +2485,9 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
     if (String(item.id) === String(state.infoBoardSelectedItemId)) {
       box.classList.add("selected");
     }
+    if (String(item.id) === String(state.infoBoardArrowFromItemId)) {
+      box.classList.add("arrow-source");
+    }
     box.style.left = `${item.x}px`;
     box.style.top = `${item.y}px`;
     box.style.width = `${item.width}px`;
@@ -2650,11 +2657,19 @@ function wireInformationBoardPane(root) {
 
   addTextBtn.addEventListener("click", () => {
     if (!editable) return;
-    const item = createBoardItem("text", { text: "Important note" });
+    const initialText = prompt("Enter note text", "Important note");
+    if (initialText == null) return;
+    const item = createBoardItem("text", { text: String(initialText || "Important note") });
     state.infoBoardSelectedItemId = item.id;
     state.infoBoardSelectedConnectorId = "";
     scheduleInformationBoardSave();
     render();
+    setTimeout(() => {
+      const target = root.querySelector(`.info-board-item[data-item-id="${item.id}"] .info-board-text`);
+      if (target instanceof HTMLElement) {
+        target.focus();
+      }
+    }, 0);
   });
 
   addImageBtn.addEventListener("click", () => {
@@ -2682,8 +2697,16 @@ function wireInformationBoardPane(root) {
             : encoded;
         const item = createBoardItem("image", { image_url: imageUrl });
         state.infoBoardSelectedItemId = item.id;
+        state.infoBoardSelectedConnectorId = "";
+        statusEl.textContent = "Image added. Drag to move, bottom-right corner to resize.";
         scheduleInformationBoardSave();
         render();
+        setTimeout(() => {
+          const target = root.querySelector(`.info-board-item[data-item-id="${item.id}"]`);
+          if (target instanceof HTMLElement) {
+            target.scrollIntoView({ block: "nearest", inline: "nearest" });
+          }
+        }, 0);
       } catch (err) {
         statusEl.textContent = `Image add failed: ${String(err?.message || err)}`;
       } finally {
@@ -2699,7 +2722,9 @@ function wireInformationBoardPane(root) {
       statusEl.textContent = "Arrow mode cancelled.";
     } else {
       state.infoBoardArrowFromItemId = "__pick_source__";
-      statusEl.textContent = "Arrow mode: click source item, then destination item.";
+      state.infoBoardSelectedConnectorId = "";
+      state.infoBoardSelectedItemId = "";
+      statusEl.textContent = "Arrow mode: click source card, then destination card.";
     }
     render();
   });
