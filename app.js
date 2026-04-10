@@ -17,6 +17,7 @@ const LOCAL_MODE_KEY = "carechat.local_mode";
 const DAD_DRAFT_KEY = "carechat.dad_draft";
 const CAREGIVER_DRAFT_KEY = "carechat.caregiver_draft";
 const CAREGIVER_TAB_KEY = "carechat.caregiver_tab";
+const INFO_BOARD_KEY = "carechat.info_board";
 const DAD_UI_DRAFT_KEY = "carechat.dad_ui_draft";
 const DEVICE_ID_KEY = "carechat.device_id";
 const DAD_LAST_MSG_AT_KEY = "carechat.dad_last_msg_at";
@@ -24,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.17";
+const APP_VERSION = "wave1-2026-04-02.19";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -39,6 +40,7 @@ let messagesChannelConversationId = null;
 let realtimeRefreshInFlight = false;
 let realtimeRefreshQueued = false;
 let dadAutoSnapTimer = null;
+let caregiverAutoSnapTimer = null;
 let outboxSyncPromise = null;
 let ensureConversationPromise = null;
 let bootstrapRemotePromise = null;
@@ -111,6 +113,7 @@ const DAD_TYPING_POLL_MS = Math.max(
   2_000,
   parseMsWithDefault(config.DAD_TYPING_POLL_MS, 5_000)
 );
+const INFO_BOARD_POLL_MS = Math.max(10_000, parseMsWithDefault(config.INFO_BOARD_POLL_MS, 30_000));
 const DAD_ALERT_PROMPT_RETRY_MS = Math.max(
   10 * 60_000,
   parseMsWithDefault(config.DAD_ALERT_PROMPT_RETRY_MS, 12 * 60 * 60_000)
@@ -119,11 +122,43 @@ const DAD_INACTIVE_AUTO_SCROLL_MS = Math.max(
   10_000,
   parseMsWithDefault(config.DAD_INACTIVE_AUTO_SCROLL_MS, 60_000)
 );
+const CAREGIVER_INACTIVE_AUTO_SCROLL_MS = Math.max(
+  10_000,
+  parseMsWithDefault(config.CAREGIVER_INACTIVE_AUTO_SCROLL_MS, 60_000)
+);
+const AUTO_SCROLL_SELF_CHECK_MS = Math.max(
+  4_000,
+  parseMsWithDefault(config.AUTO_SCROLL_SELF_CHECK_MS, 8_000)
+);
+const MESSAGE_AGED_DAYS = Math.max(1, parseMsWithDefault(config.MESSAGE_AGED_DAYS, 2));
 const IMAGE_STORAGE_BUCKET = String(config.IMAGE_STORAGE_BUCKET || "chat-images").trim();
 const USE_STORAGE_FOR_IMAGES = config.USE_STORAGE_FOR_IMAGES !== false;
 const CLIENT_DIAG_THROTTLE_MS = Math.max(1_500, parseMsWithDefault(config.CLIENT_DIAG_THROTTLE_MS, 5_000));
 const CLIENT_WATCHDOG_MS = Math.max(5_000, parseMsWithDefault(config.CLIENT_WATCHDOG_MS, 15_000));
 const CLIENT_REFRESH_STALL_MS = Math.max(20_000, parseMsWithDefault(config.CLIENT_REFRESH_STALL_MS, 45_000));
+const INFO_BOARD_SAVE_DEBOUNCE_MS = Math.max(
+  300,
+  parseMsWithDefault(config.INFO_BOARD_SAVE_DEBOUNCE_MS, 700)
+);
+
+function defaultInformationBoardPayload() {
+  return {
+    schema_version: 1,
+    items: [],
+    connectors: [],
+    canvas_height: 1200,
+  };
+}
+
+function defaultInformationBoardState() {
+  return {
+    enabledForDad: false,
+    enabledForCaregiver: true,
+    payload: defaultInformationBoardPayload(),
+    updatedAt: "",
+    updatedBy: "",
+  };
+}
 
 function fetchWithTimeout(url, options = {}) {
   const { signal: outer, ...rest } = options;
@@ -220,6 +255,12 @@ const state = {
   caregiverDraft: localStorage.getItem(CAREGIVER_DRAFT_KEY) || "",
   caregiverImageDraft: null,
   caregiverTab: localStorage.getItem(CAREGIVER_TAB_KEY) || "chat",
+  infoBoard: readJson(INFO_BOARD_KEY, defaultInformationBoardState()),
+  infoBoardStatus: "",
+  infoBoardSelectedItemId: "",
+  infoBoardSelectedConnectorId: "",
+  infoBoardArrowFromItemId: "",
+  infoBoardImageDraftInFlight: false,
   messages: [],
   outbox: readJson(OUTBOX_KEY, []),
   conversationId: localStorage.getItem(CONVERSATION_KEY) || null,
@@ -255,6 +296,8 @@ const state = {
   caregiverVisibleMessageCount: 0,
   dadStickToBottom: true,
   caregiverStickToBottom: true,
+  caregiverLastScrollTop: 0,
+  caregiverLastScrollChangeAt: Date.now(),
   dadTyping: false,
   dadOnline: false,
   dadLastPresenceAt: "",
@@ -298,7 +341,11 @@ const state = {
   lastPresenceEmitAt: 0,
   lastRemoteSettingsFetchAt: 0,
   lastDadTypingFetchAt: 0,
+  lastInfoBoardFetchAt: 0,
+  infoBoardSaveTimer: null,
+  infoBoardSaveInFlight: false,
 };
+state.infoBoard = normalizeInfoBoardState(state.infoBoard);
 
 function pushDebugEvent(level, message, details = "") {
   const line = `${new Date().toISOString()} [${String(level || "info").toUpperCase()}] ${String(
@@ -377,6 +424,7 @@ async function recoverClientPipeline(reason) {
     await syncMessagesRealtimeSubscription();
     await loadMessages();
     await loadRemoteSettings(true);
+    await loadInformationBoard(true);
     state.lastRefreshOkAt = Date.now();
     render();
     await emitClientDiagnostic("recover_ok", { reason }, { force: true, throttleKey: "recover_ok" });
@@ -466,6 +514,7 @@ async function init() {
   }
   startOutboxSyncLoop();
   startMessageRefreshLoop();
+  startAutoScrollSelfCheckLoop();
   setupClientWatchdog();
   await setupServiceWorker();
   setupAppUpdatePolling();
@@ -546,6 +595,7 @@ async function bootstrapRemote() {
   await ensureConversation();
   await syncMessagesRealtimeSubscription();
   await loadRemoteSettings(true);
+  await loadInformationBoard(true);
   await emitPresenceHeartbeat(true);
   await loadDadOnlineStatus(true);
   await emitAppVersionHeartbeat(true);
@@ -695,6 +745,143 @@ async function loadRemoteSettings(force = false) {
   }
 }
 
+function sanitizeInfoBoardPayload(raw) {
+  const fallback = defaultInformationBoardPayload();
+  if (!raw || typeof raw !== "object") return fallback;
+  const items = Array.isArray(raw.items) ? raw.items : [];
+  const connectors = Array.isArray(raw.connectors) ? raw.connectors : [];
+  const safeItems = items
+    .map((item, idx) => {
+      if (!item || typeof item !== "object") return null;
+      const id = String(item.id || `item-${idx + 1}`);
+      const type = item.type === "image" ? "image" : "text";
+      const x = Number.isFinite(Number(item.x)) ? Number(item.x) : 20;
+      const y = Number.isFinite(Number(item.y)) ? Number(item.y) : 20 + idx * 20;
+      const width = Math.max(120, Number.isFinite(Number(item.width)) ? Number(item.width) : type === "image" ? 240 : 260);
+      const height = Math.max(70, Number.isFinite(Number(item.height)) ? Number(item.height) : type === "image" ? 180 : 140);
+      const z = Number.isFinite(Number(item.z)) ? Number(item.z) : idx + 1;
+      const text = type === "text" ? String(item.text || "New note") : "";
+      const imageUrl = type === "image" ? String(item.image_url || "") : "";
+      return { id, type, x, y, width, height, z, text, image_url: imageUrl };
+    })
+    .filter(Boolean);
+  const itemIdSet = new Set(safeItems.map((item) => item.id));
+  const safeConnectors = connectors
+    .map((connector, idx) => {
+      if (!connector || typeof connector !== "object") return null;
+      const fromItemId = String(connector.from_item_id || "");
+      const toItemId = String(connector.to_item_id || "");
+      if (!itemIdSet.has(fromItemId) || !itemIdSet.has(toItemId) || fromItemId === toItemId) return null;
+      return {
+        id: String(connector.id || `connector-${idx + 1}`),
+        from_item_id: fromItemId,
+        to_item_id: toItemId,
+      };
+    })
+    .filter(Boolean);
+  return {
+    schema_version: 1,
+    items: safeItems,
+    connectors: safeConnectors,
+    canvas_height: Math.max(800, Number.isFinite(Number(raw.canvas_height)) ? Number(raw.canvas_height) : 1200),
+  };
+}
+
+function normalizeInfoBoardState(raw) {
+  const safe = defaultInformationBoardState();
+  if (!raw || typeof raw !== "object") return safe;
+  return {
+    enabledForDad: Boolean(raw.enabledForDad ?? raw.enabled_for_dad ?? safe.enabledForDad),
+    enabledForCaregiver: Boolean(raw.enabledForCaregiver ?? raw.enabled_for_caregiver ?? safe.enabledForCaregiver),
+    payload: sanitizeInfoBoardPayload(raw.payload ?? raw.board_payload),
+    updatedAt: String(raw.updatedAt ?? raw.updated_at ?? safe.updatedAt ?? ""),
+    updatedBy: String(raw.updatedBy ?? raw.updated_by ?? safe.updatedBy ?? ""),
+  };
+}
+
+function infoBoardSignature(board) {
+  const normalized = normalizeInfoBoardState(board);
+  return JSON.stringify(normalized);
+}
+
+function persistInformationBoard() {
+  try {
+    localStorage.setItem(INFO_BOARD_KEY, JSON.stringify(normalizeInfoBoardState(state.infoBoard)));
+  } catch (err) {
+    console.warn("Could not persist information board cache", err);
+  }
+}
+
+async function loadInformationBoard(force = false) {
+  if (!supabase || !state.conversationId) return;
+  const now = Date.now();
+  if (!force && now - Number(state.lastInfoBoardFetchAt || 0) < INFO_BOARD_POLL_MS) return;
+  state.lastInfoBoardFetchAt = now;
+  try {
+    const { data, error } = await supabase
+      .from("information_boards")
+      .select("*")
+      .eq("conversation_id", state.conversationId)
+      .maybeSingle();
+    if (error) throw error;
+    const before = infoBoardSignature(state.infoBoard);
+    const next = data
+      ? normalizeInfoBoardState(data)
+      : normalizeInfoBoardState(defaultInformationBoardState());
+    state.infoBoard = next;
+    if (!next.enabledForCaregiver && state.caregiverTab === "info-board") {
+      state.caregiverTab = "chat";
+      localStorage.setItem(CAREGIVER_TAB_KEY, "chat");
+    }
+    persistInformationBoard();
+    if (before !== infoBoardSignature(next)) {
+      state.infoBoardStatus = "";
+    }
+  } catch (err) {
+    emitClientDiagnostic("info_board_load_failed", { error: String(err?.message || err) });
+  }
+}
+
+async function saveInformationBoardNow() {
+  if (!supabase || !state.conversationId || state.role !== "caregiver") return;
+  if (state.infoBoardSaveInFlight) return;
+  state.infoBoardSaveInFlight = true;
+  try {
+    const payload = {
+      p_conversation_id: state.conversationId,
+      p_enabled_for_dad: Boolean(state.infoBoard.enabledForDad),
+      p_enabled_for_caregiver: Boolean(state.infoBoard.enabledForCaregiver),
+      p_board_payload: sanitizeInfoBoardPayload(state.infoBoard.payload),
+    };
+    const { data, error } = await supabase.rpc("save_information_board", payload);
+    if (error) throw error;
+    if (data) {
+      state.infoBoard = normalizeInfoBoardState(data);
+      persistInformationBoard();
+    }
+    state.infoBoardStatus = `Saved ${formatTime(new Date().toISOString())}`;
+  } catch (err) {
+    state.infoBoardStatus = `Save failed: ${String(err?.message || err)}`;
+    emitClientDiagnostic("info_board_save_failed", { error: String(err?.message || err) });
+  } finally {
+    state.infoBoardSaveInFlight = false;
+  }
+}
+
+function scheduleInformationBoardSave() {
+  persistInformationBoard();
+  if (state.infoBoardSaveTimer) {
+    clearTimeout(state.infoBoardSaveTimer);
+  }
+  state.infoBoardStatus = "Saving...";
+  state.infoBoardSaveTimer = setTimeout(() => {
+    state.infoBoardSaveTimer = null;
+    saveInformationBoardNow().then(() => {
+      if (!isUserEditingControl()) render();
+    });
+  }, INFO_BOARD_SAVE_DEBOUNCE_MS);
+}
+
 function onRoleChange(event) {
   state.role = event.target.value;
   if (isDadRoleLocked()) {
@@ -707,10 +894,15 @@ function onRoleChange(event) {
 
 function render() {
   clearDadAutoSnapTimer();
+  clearCaregiverAutoSnapTimer();
   rememberThreadScrollIntent();
   dismissMessageContextMenu();
   enforceRoleLock();
   applyRoleTheme();
+  document.body.classList.toggle(
+    "dad-board-wide",
+    state.role === "dad" && Boolean(state.infoBoard?.enabledForDad) && !state.authRequired
+  );
   updateAppTitle();
   appRoot.innerHTML = "";
   if (state.authRequired) {
@@ -750,7 +942,7 @@ async function runRealtimeRefresh() {
   try {
     const beforeSig = appStateSignature();
     const beforeMessages = Array.isArray(state.messages) ? [...state.messages] : [];
-    await Promise.all([loadMessages(), loadRemoteSettings(false)]);
+    await Promise.all([loadMessages(), loadRemoteSettings(false), loadInformationBoard(false)]);
     handleInboundAlerts(beforeMessages, state.messages);
     const afterSig = appStateSignature();
     if (beforeSig !== afterSig && !isUserEditingControl()) {
@@ -796,6 +988,20 @@ async function syncMessagesRealtimeSubscription() {
         });
       }
     )
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "information_boards",
+        filter: `conversation_id=eq.${state.conversationId}`,
+      },
+      () => {
+        runRealtimeRefresh().catch(() => {
+          // noop
+        });
+      }
+    )
     .subscribe((status) => {
       if (status === "CHANNEL_ERROR") {
         console.warn("Realtime channel error; polling fallback remains active.");
@@ -807,6 +1013,12 @@ function clearDadAutoSnapTimer() {
   if (!dadAutoSnapTimer) return;
   clearTimeout(dadAutoSnapTimer);
   dadAutoSnapTimer = null;
+}
+
+function clearCaregiverAutoSnapTimer() {
+  if (!caregiverAutoSnapTimer) return;
+  clearTimeout(caregiverAutoSnapTimer);
+  caregiverAutoSnapTimer = null;
 }
 
 function scheduleDadAutoSnap(threadEl) {
@@ -827,6 +1039,51 @@ function scheduleDadAutoSnap(threadEl) {
   }, DAD_INACTIVE_AUTO_SCROLL_MS);
 }
 
+function scheduleCaregiverAutoSnap(threadEl) {
+  if (!threadEl || state.role !== "caregiver") return;
+  clearCaregiverAutoSnapTimer();
+  if (isThreadNearBottom(threadEl)) return;
+  caregiverAutoSnapTimer = setTimeout(() => {
+    caregiverAutoSnapTimer = null;
+    if (state.role !== "caregiver") return;
+    const currentThread = document.getElementById("caregiverThread");
+    if (!currentThread) return;
+    if (!isThreadNearBottom(currentThread)) {
+      scrollThreadToBottom(currentThread);
+      state.caregiverStickToBottom = true;
+      state.caregiverLastScrollTop = Number(currentThread.scrollTop || 0);
+      state.caregiverLastScrollChangeAt = Date.now();
+    }
+  }, CAREGIVER_INACTIVE_AUTO_SCROLL_MS);
+}
+
+function startAutoScrollSelfCheckLoop() {
+  setInterval(() => {
+    const now = Date.now();
+    const dadThread = document.getElementById("dadThread");
+    if (dadThread && state.role === "dad") {
+      if (!isThreadNearBottom(dadThread) && now - Number(state.dadLastScrollChangeAt || 0) >= DAD_INACTIVE_AUTO_SCROLL_MS) {
+        scrollThreadToBottom(dadThread);
+        state.dadStickToBottom = true;
+        state.dadLastScrollTop = Number(dadThread.scrollTop || 0);
+        state.dadLastScrollChangeAt = now;
+      }
+    }
+    const caregiverThread = document.getElementById("caregiverThread");
+    if (caregiverThread && state.role === "caregiver") {
+      if (
+        !isThreadNearBottom(caregiverThread) &&
+        now - Number(state.caregiverLastScrollChangeAt || 0) >= CAREGIVER_INACTIVE_AUTO_SCROLL_MS
+      ) {
+        scrollThreadToBottom(caregiverThread);
+        state.caregiverStickToBottom = true;
+        state.caregiverLastScrollTop = Number(caregiverThread.scrollTop || 0);
+        state.caregiverLastScrollChangeAt = now;
+      }
+    }
+  }, AUTO_SCROLL_SELF_CHECK_MS);
+}
+
 function rememberThreadScrollIntent() {
   const dadThread = document.getElementById("dadThread");
   if (dadThread) {
@@ -840,6 +1097,11 @@ function rememberThreadScrollIntent() {
   const caregiverThread = document.getElementById("caregiverThread");
   if (caregiverThread) {
     state.caregiverStickToBottom = isThreadNearBottom(caregiverThread);
+    const nextTop = Number(caregiverThread.scrollTop || 0);
+    if (Math.abs(nextTop - Number(state.caregiverLastScrollTop || 0)) > 1) {
+      state.caregiverLastScrollTop = nextTop;
+      state.caregiverLastScrollChangeAt = Date.now();
+    }
   }
 }
 
@@ -1039,6 +1301,11 @@ function renderDadView() {
   const tpl = document.getElementById("dad-view-template");
   const node = tpl.content.cloneNode(true);
   const panel = node.querySelector(".panel");
+  const dadLayout = node.getElementById("dadLayout");
+  const dadBoardPane = node.getElementById("dadBoardPane");
+  const dadBoardCanvas = node.getElementById("dadBoardCanvas");
+  const dadBoardArrows = node.getElementById("dadBoardArrows");
+  const dadBoardScroller = node.getElementById("dadBoardScroller");
   const thread = node.getElementById("dadThread");
   const form = node.getElementById("dadComposer");
   const input = node.getElementById("dadInput");
@@ -1061,6 +1328,24 @@ function renderDadView() {
 
   applyUiFontScale(panel, state.appliedDadUI.uiFontScale, 16);
   applyDadUiTokens(thread, state.appliedDadUI);
+
+  const showBoard = Boolean(state.infoBoard?.enabledForDad);
+  if (dadLayout) {
+    dadLayout.classList.toggle("split", showBoard);
+  }
+  if (dadBoardPane) {
+    dadBoardPane.hidden = !showBoard;
+  }
+  document.body.classList.toggle("dad-board-wide", showBoard);
+  if (showBoard && dadBoardCanvas && dadBoardArrows && dadBoardScroller) {
+    renderInformationBoardSurface({
+      canvasEl: dadBoardCanvas,
+      arrowsEl: dadBoardArrows,
+      scrollerEl: dadBoardScroller,
+      editable: false,
+      statusEl: null,
+    });
+  }
 
   let visibleCount = 0;
   for (const msg of state.messages) {
@@ -1129,6 +1414,7 @@ function renderCaregiverView() {
   const tpl = document.getElementById("caregiver-view-template");
   const node = tpl.content.cloneNode(true);
   const panel = node.querySelector(".panel");
+  document.body.classList.remove("dad-board-wide");
   const thread = node.getElementById("caregiverThread");
   const form = node.getElementById("caregiverComposer");
   const input = node.getElementById("caregiverInput");
@@ -1139,6 +1425,7 @@ function renderCaregiverView() {
   });
 
   const tabs = node.getElementById("tabs");
+  const infoBoardTabButton = tabs?.querySelector('button[data-tab="info-board"]');
   const outboxStatus = node.getElementById("outboxStatus");
   const dadAlertBanner = node.getElementById("dadAlertBanner");
   const dadAlertText = node.getElementById("dadAlertText");
@@ -1149,6 +1436,9 @@ function renderCaregiverView() {
   const dadOnlineText = node.getElementById("dadOnlineText");
   applyUiFontScale(panel, state.caregiverUI.uiFontScale, 16);
   applyCaregiverUiTokens(thread, state.caregiverUI);
+  if (infoBoardTabButton) {
+    infoBoardTabButton.hidden = !Boolean(state.infoBoard?.enabledForCaregiver);
+  }
 
   let visibleCount = 0;
   for (const msg of state.messages) {
@@ -1160,10 +1450,24 @@ function renderCaregiverView() {
     visibleCount += 1;
     thread.appendChild(renderPendingBubble(pending));
   }
+  thread.addEventListener(
+    "scroll",
+    () => {
+      const top = Number(thread.scrollTop || 0);
+      if (Math.abs(top - Number(state.caregiverLastScrollTop || 0)) > 1) {
+        state.caregiverLastScrollTop = top;
+        state.caregiverLastScrollChangeAt = Date.now();
+      }
+      scheduleCaregiverAutoSnap(thread);
+    },
+    { passive: true }
+  );
 
   const panes = node.querySelectorAll(".pane");
+  const availableTabs = ["chat", "info-board", "dad-ui", "ai-rules"];
   const setCaregiverTab = (tab) => {
-    const safeTab = ["chat", "dad-ui", "ai-rules"].includes(tab) ? tab : "chat";
+    let safeTab = availableTabs.includes(tab) ? tab : "chat";
+    if (safeTab === "info-board" && !state.infoBoard?.enabledForCaregiver) safeTab = "chat";
     state.caregiverTab = safeTab;
     localStorage.setItem(CAREGIVER_TAB_KEY, safeTab);
     tabs.querySelectorAll("button").forEach((b) => {
@@ -1180,6 +1484,7 @@ function renderCaregiverView() {
     if (!tab) return;
     setCaregiverTab(tab);
   });
+  wireCaregiverTabSwipe(panel, setCaregiverTab, availableTabs);
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1211,6 +1516,7 @@ function renderCaregiverView() {
   wireThreadMessageActions(thread);
   wireDadUiPane(node);
   wireCaregiverUiPane(node);
+  wireInformationBoardPane(node);
   wireAiRulesPane(node);
   wireDiagnosticsPanel(node, "caregiver");
 
@@ -1253,6 +1559,7 @@ function renderCaregiverView() {
   if (state.caregiverStickToBottom || visibleCount > state.caregiverVisibleMessageCount) {
     scrollThreadToBottom(thread);
   }
+  scheduleCaregiverAutoSnap(thread);
   state.caregiverVisibleMessageCount = visibleCount;
 }
 
@@ -1917,6 +2224,10 @@ function wireCaregiverUiPane(root) {
   const bubbleWidth = root.getElementById("caregiverBubbleWidth");
   const applyBtn = root.getElementById("applyCaregiverUi");
   const status = root.getElementById("caregiverUiStatus");
+  const boardEnabledForCaregiver = root.getElementById("boardEnabledForCaregiver");
+  const boardEnabledForDad = root.getElementById("boardEnabledForDad");
+  const applyBoardVisibility = root.getElementById("applyBoardVisibility");
+  const boardVisibilityStatus = root.getElementById("boardVisibilityStatus");
   const caregiverVersionInfo = root.getElementById("caregiverVersionInfo");
   const dadVersionInfo = root.getElementById("dadVersionInfo");
   const refreshVersionInfo = root.getElementById("refreshVersionInfo");
@@ -1926,6 +2237,12 @@ function wireCaregiverUiPane(root) {
   uiFontScale.value = String(state.caregiverUI.uiFontScale || 16);
   theme.value = state.caregiverUI.theme || "clear";
   bubbleWidth.value = String(state.caregiverUI.bubbleWidth || 84);
+  if (boardEnabledForCaregiver) {
+    boardEnabledForCaregiver.value = state.infoBoard?.enabledForCaregiver ? "1" : "0";
+  }
+  if (boardEnabledForDad) {
+    boardEnabledForDad.value = state.infoBoard?.enabledForDad ? "1" : "0";
+  }
 
   applyBtn.addEventListener("click", () => {
     state.caregiverUI = {
@@ -1956,6 +2273,446 @@ function wireCaregiverUiPane(root) {
       render();
     });
   }
+  if (applyBoardVisibility && boardEnabledForCaregiver && boardEnabledForDad && boardVisibilityStatus) {
+    applyBoardVisibility.addEventListener("click", () => {
+      state.infoBoard.enabledForCaregiver = boardEnabledForCaregiver.value === "1";
+      state.infoBoard.enabledForDad = boardEnabledForDad.value === "1";
+      if (!state.infoBoard.enabledForCaregiver && state.caregiverTab === "info-board") {
+        state.caregiverTab = "chat";
+        localStorage.setItem(CAREGIVER_TAB_KEY, "chat");
+      }
+      boardVisibilityStatus.textContent = "Board visibility updated.";
+      scheduleInformationBoardSave();
+      render();
+    });
+  }
+}
+
+function wireCaregiverTabSwipe(panelEl, setTab, orderedTabs) {
+  if (!panelEl || typeof setTab !== "function" || !Array.isArray(orderedTabs)) return;
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+  const shouldIgnore = (target) => {
+    if (!target || !(target instanceof Element)) return true;
+    if (target.closest(".thread")) return true;
+    if (target.closest(".info-board-item")) return true;
+    const tag = target.tagName;
+    return ["INPUT", "TEXTAREA", "BUTTON", "SELECT", "LABEL"].includes(tag) || target.isContentEditable;
+  };
+  panelEl.addEventListener(
+    "touchstart",
+    (event) => {
+      if (event.touches?.length !== 1) return;
+      if (shouldIgnore(event.target)) return;
+      tracking = true;
+      startX = event.touches[0].clientX;
+      startY = event.touches[0].clientY;
+    },
+    { passive: true }
+  );
+  panelEl.addEventListener(
+    "touchend",
+    (event) => {
+      if (!tracking || !event.changedTouches?.length) return;
+      tracking = false;
+      const endX = event.changedTouches[0].clientX;
+      const endY = event.changedTouches[0].clientY;
+      const dx = endX - startX;
+      const dy = endY - startY;
+      if (Math.abs(dx) < 70 || Math.abs(dy) > 45) return;
+      const visibleTabs = orderedTabs.filter((tab) => {
+        if (tab !== "info-board") return true;
+        return Boolean(state.infoBoard?.enabledForCaregiver);
+      });
+      const current = visibleTabs.includes(state.caregiverTab) ? state.caregiverTab : visibleTabs[0];
+      const idx = visibleTabs.indexOf(current);
+      if (idx < 0) return;
+      if (dx < 0 && idx < visibleTabs.length - 1) setTab(visibleTabs[idx + 1]);
+      if (dx > 0 && idx > 0) setTab(visibleTabs[idx - 1]);
+    },
+    { passive: true }
+  );
+}
+
+function getInformationBoardPayload() {
+  state.infoBoard = normalizeInfoBoardState(state.infoBoard);
+  return state.infoBoard.payload;
+}
+
+function getBoardItemById(itemId) {
+  const payload = getInformationBoardPayload();
+  return payload.items.find((item) => String(item.id) === String(itemId)) || null;
+}
+
+function getNextBoardZ() {
+  const payload = getInformationBoardPayload();
+  return payload.items.reduce((max, item) => Math.max(max, Number(item.z || 1)), 0) + 1;
+}
+
+function ensureBoardCanvasHeight() {
+  const payload = getInformationBoardPayload();
+  const bottom = payload.items.reduce(
+    (max, item) => Math.max(max, Number(item.y || 0) + Number(item.height || 0) + 80),
+    900
+  );
+  payload.canvas_height = Math.max(900, bottom);
+}
+
+function removeSelectedBoardEntity() {
+  const payload = getInformationBoardPayload();
+  if (state.infoBoardSelectedItemId) {
+    const selectedId = String(state.infoBoardSelectedItemId);
+    payload.items = payload.items.filter((item) => String(item.id) !== selectedId);
+    payload.connectors = payload.connectors.filter(
+      (connector) => String(connector.from_item_id) !== selectedId && String(connector.to_item_id) !== selectedId
+    );
+    state.infoBoardSelectedItemId = "";
+    state.infoBoardArrowFromItemId = "";
+    ensureBoardCanvasHeight();
+    return true;
+  }
+  if (state.infoBoardSelectedConnectorId) {
+    const selectedId = String(state.infoBoardSelectedConnectorId);
+    payload.connectors = payload.connectors.filter((connector) => String(connector.id) !== selectedId);
+    state.infoBoardSelectedConnectorId = "";
+    return true;
+  }
+  return false;
+}
+
+function createBoardItem(type, partial = {}) {
+  const payload = getInformationBoardPayload();
+  const now = Date.now();
+  const item = {
+    id: String(partial.id || `${type}-${now}-${Math.floor(Math.random() * 1000)}`),
+    type: type === "image" ? "image" : "text",
+    x: Number.isFinite(Number(partial.x)) ? Number(partial.x) : 30,
+    y: Number.isFinite(Number(partial.y)) ? Number(partial.y) : 30 + payload.items.length * 24,
+    width: Math.max(120, Number.isFinite(Number(partial.width)) ? Number(partial.width) : type === "image" ? 280 : 300),
+    height: Math.max(80, Number.isFinite(Number(partial.height)) ? Number(partial.height) : type === "image" ? 190 : 150),
+    z: Number.isFinite(Number(partial.z)) ? Number(partial.z) : getNextBoardZ(),
+    text: String(partial.text || (type === "text" ? "Important note" : "")),
+    image_url: String(partial.image_url || ""),
+  };
+  payload.items.push(item);
+  ensureBoardCanvasHeight();
+  return item;
+}
+
+function getBoardItemCenter(item) {
+  return {
+    x: Number(item.x || 0) + Number(item.width || 0) / 2,
+    y: Number(item.y || 0) + Number(item.height || 0) / 2,
+  };
+}
+
+function drawInformationBoardArrows(arrowsEl, payload, editable) {
+  if (!arrowsEl) return;
+  arrowsEl.innerHTML = "";
+  arrowsEl.setAttribute("viewBox", `0 0 1800 ${Math.max(900, Number(payload.canvas_height || 1200))}`);
+  arrowsEl.setAttribute("preserveAspectRatio", "none");
+  const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+  const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+  marker.setAttribute("id", "infoBoardArrowHead");
+  marker.setAttribute("markerWidth", "10");
+  marker.setAttribute("markerHeight", "8");
+  marker.setAttribute("refX", "8");
+  marker.setAttribute("refY", "4");
+  marker.setAttribute("orient", "auto-start-reverse");
+  const markerPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  markerPath.setAttribute("d", "M0,0 L10,4 L0,8 z");
+  markerPath.setAttribute("fill", "#1e3a8a");
+  marker.appendChild(markerPath);
+  defs.appendChild(marker);
+  arrowsEl.appendChild(defs);
+
+  payload.connectors.forEach((connector) => {
+    const from = payload.items.find((item) => String(item.id) === String(connector.from_item_id));
+    const to = payload.items.find((item) => String(item.id) === String(connector.to_item_id));
+    if (!from || !to) return;
+    const fromCenter = getBoardItemCenter(from);
+    const toCenter = getBoardItemCenter(to);
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const midX = fromCenter.x + (toCenter.x - fromCenter.x) * 0.45;
+    path.setAttribute(
+      "d",
+      `M ${fromCenter.x} ${fromCenter.y} C ${midX} ${fromCenter.y}, ${midX} ${toCenter.y}, ${toCenter.x} ${toCenter.y}`
+    );
+    path.setAttribute("class", "arrow-line");
+    path.setAttribute("marker-end", "url(#infoBoardArrowHead)");
+    if (String(connector.id) === String(state.infoBoardSelectedConnectorId)) {
+      path.classList.add("selected");
+    }
+    if (editable) {
+      path.addEventListener("click", (event) => {
+        event.stopPropagation();
+        state.infoBoardSelectedItemId = "";
+        state.infoBoardSelectedConnectorId = String(connector.id);
+        render();
+      });
+    }
+    arrowsEl.appendChild(path);
+  });
+}
+
+function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editable, statusEl }) {
+  if (!canvasEl || !arrowsEl || !scrollerEl) return;
+  const payload = getInformationBoardPayload();
+  canvasEl.innerHTML = "";
+  canvasEl.style.minHeight = `${Math.max(900, Number(payload.canvas_height || 1200))}px`;
+  drawInformationBoardArrows(arrowsEl, payload, editable);
+
+  if (!payload.items.length) {
+    const empty = document.createElement("div");
+    empty.className = "info-board-empty";
+    empty.textContent = editable
+      ? "No board items yet. Use Add text or Add image."
+      : "No information cards yet.";
+    canvasEl.appendChild(empty);
+    return;
+  }
+
+  const itemsSorted = [...payload.items].sort((a, b) => Number(a.z || 1) - Number(b.z || 1));
+  itemsSorted.forEach((item) => {
+    const box = document.createElement("article");
+    box.className = "info-board-item";
+    box.dataset.itemId = item.id;
+    if (String(item.id) === String(state.infoBoardSelectedItemId)) {
+      box.classList.add("selected");
+    }
+    box.style.left = `${item.x}px`;
+    box.style.top = `${item.y}px`;
+    box.style.width = `${item.width}px`;
+    box.style.height = `${item.height}px`;
+    box.style.zIndex = String(Math.max(1, Number(item.z || 1)));
+
+    if (item.type === "image") {
+      const img = document.createElement("img");
+      img.className = "info-board-image";
+      img.src = item.image_url || "";
+      img.alt = "Information board image";
+      box.appendChild(img);
+    } else {
+      const text = document.createElement("div");
+      text.className = "info-board-text";
+      text.textContent = item.text || "";
+      text.contentEditable = editable ? "true" : "false";
+      if (editable) {
+        text.addEventListener("input", () => {
+          item.text = text.textContent || "";
+          scheduleInformationBoardSave();
+          if (statusEl) statusEl.textContent = state.infoBoardStatus;
+        });
+      }
+      box.appendChild(text);
+    }
+
+    if (editable) {
+      const handleSelect = () => {
+        state.infoBoardSelectedItemId = String(item.id);
+        state.infoBoardSelectedConnectorId = "";
+      };
+      box.addEventListener("click", (event) => {
+        event.stopPropagation();
+        handleSelect();
+        if (state.infoBoardArrowFromItemId) {
+          const from = state.infoBoardArrowFromItemId;
+          if (from === "__pick_source__") {
+            state.infoBoardArrowFromItemId = item.id;
+            if (statusEl) statusEl.textContent = "Arrow mode: now click the destination item.";
+          } else if (from && from !== item.id) {
+            payload.connectors.push({
+              id: `connector-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+              from_item_id: from,
+              to_item_id: item.id,
+            });
+            state.infoBoardArrowFromItemId = "";
+            scheduleInformationBoardSave();
+            if (statusEl) statusEl.textContent = "Arrow added.";
+          }
+        }
+        render();
+      });
+
+      box.addEventListener("pointerdown", (event) => {
+        const target = event.target;
+        if (target instanceof HTMLElement && (target.classList.contains("info-board-resize") || target.isContentEditable)) {
+          return;
+        }
+        event.preventDefault();
+        handleSelect();
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const originX = Number(item.x || 0);
+        const originY = Number(item.y || 0);
+        item.z = getNextBoardZ();
+        const onMove = (moveEvent) => {
+          item.x = Math.max(0, originX + (moveEvent.clientX - startX));
+          item.y = Math.max(0, originY + (moveEvent.clientY - startY));
+          box.style.left = `${item.x}px`;
+          box.style.top = `${item.y}px`;
+          drawInformationBoardArrows(arrowsEl, payload, true);
+        };
+        const onUp = () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          ensureBoardCanvasHeight();
+          scheduleInformationBoardSave();
+          render();
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp, { once: true });
+      });
+
+      const resizeHandle = document.createElement("div");
+      resizeHandle.className = "info-board-resize";
+      resizeHandle.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        handleSelect();
+        const startX = event.clientX;
+        const startY = event.clientY;
+        const originW = Number(item.width || 120);
+        const originH = Number(item.height || 80);
+        const onMove = (moveEvent) => {
+          item.width = Math.max(120, originW + (moveEvent.clientX - startX));
+          item.height = Math.max(80, originH + (moveEvent.clientY - startY));
+          box.style.width = `${item.width}px`;
+          box.style.height = `${item.height}px`;
+          drawInformationBoardArrows(arrowsEl, payload, true);
+        };
+        const onUp = () => {
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          ensureBoardCanvasHeight();
+          scheduleInformationBoardSave();
+          render();
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp, { once: true });
+      });
+      box.appendChild(resizeHandle);
+    }
+    canvasEl.appendChild(box);
+  });
+
+  if (editable) {
+    canvasEl.addEventListener("click", () => {
+      state.infoBoardSelectedItemId = "";
+      state.infoBoardSelectedConnectorId = "";
+      if (state.infoBoardArrowFromItemId) {
+        state.infoBoardArrowFromItemId = "";
+      }
+      render();
+    });
+  }
+}
+
+function wireInformationBoardPane(root) {
+  const addTextBtn = root.getElementById("boardAddText");
+  const addImageBtn = root.getElementById("boardAddImage");
+  const addArrowBtn = root.getElementById("boardAddArrow");
+  const deleteSelectedBtn = root.getElementById("boardDeleteSelected");
+  const imageFile = root.getElementById("boardImageFile");
+  const statusEl = root.getElementById("boardEditorStatus");
+  const canvasEl = root.getElementById("caregiverBoardCanvas");
+  const arrowsEl = root.getElementById("caregiverBoardArrows");
+  const scrollerEl = root.getElementById("caregiverBoardScroller");
+  if (!addTextBtn || !addImageBtn || !addArrowBtn || !deleteSelectedBtn || !statusEl) return;
+
+  const editable = Boolean(state.infoBoard?.enabledForCaregiver);
+  if (!editable) {
+    state.infoBoardArrowFromItemId = "";
+    state.infoBoardSelectedItemId = "";
+    state.infoBoardSelectedConnectorId = "";
+  }
+  addTextBtn.disabled = !editable;
+  addImageBtn.disabled = !editable;
+  addArrowBtn.disabled = !editable;
+  deleteSelectedBtn.disabled = !editable;
+  addArrowBtn.textContent = state.infoBoardArrowFromItemId ? "Cancel arrow" : "Draw arrow";
+  statusEl.textContent =
+    state.infoBoardStatus ||
+    (editable
+      ? "Tip: click Draw arrow, then click source item and destination item."
+      : "Board is hidden for caregiver view. Enable it in UI Controls.");
+
+  if (canvasEl && arrowsEl && scrollerEl) {
+    renderInformationBoardSurface({
+      canvasEl,
+      arrowsEl,
+      scrollerEl,
+      editable,
+      statusEl,
+    });
+  }
+
+  addTextBtn.addEventListener("click", () => {
+    if (!editable) return;
+    const item = createBoardItem("text", { text: "Important note" });
+    state.infoBoardSelectedItemId = item.id;
+    state.infoBoardSelectedConnectorId = "";
+    scheduleInformationBoardSave();
+    render();
+  });
+
+  addImageBtn.addEventListener("click", () => {
+    if (!editable || !imageFile || state.infoBoardImageDraftInFlight) return;
+    imageFile.value = "";
+    imageFile.click();
+  });
+
+  if (imageFile) {
+    imageFile.addEventListener("change", async () => {
+      if (!editable) return;
+      const file = imageFile.files?.[0];
+      if (!file) return;
+      if (!file.type.startsWith("image/")) {
+        statusEl.textContent = "Please choose an image file.";
+        return;
+      }
+      try {
+        state.infoBoardImageDraftInFlight = true;
+        statusEl.textContent = "Uploading image...";
+        const encoded = await encodeImageFileForUpload(file);
+        const imageUrl =
+          supabase && state.conversationId && USE_STORAGE_FOR_IMAGES
+            ? await uploadImageForMessage(encoded, state.conversationId)
+            : encoded;
+        const item = createBoardItem("image", { image_url: imageUrl });
+        state.infoBoardSelectedItemId = item.id;
+        scheduleInformationBoardSave();
+        render();
+      } catch (err) {
+        statusEl.textContent = `Image add failed: ${String(err?.message || err)}`;
+      } finally {
+        state.infoBoardImageDraftInFlight = false;
+      }
+    });
+  }
+
+  addArrowBtn.addEventListener("click", () => {
+    if (!editable) return;
+    if (state.infoBoardArrowFromItemId) {
+      state.infoBoardArrowFromItemId = "";
+      statusEl.textContent = "Arrow mode cancelled.";
+    } else {
+      state.infoBoardArrowFromItemId = "__pick_source__";
+      statusEl.textContent = "Arrow mode: click source item, then destination item.";
+    }
+    render();
+  });
+
+  deleteSelectedBtn.addEventListener("click", () => {
+    if (!editable) return;
+    if (!removeSelectedBoardEntity()) {
+      statusEl.textContent = "Select an item or arrow first.";
+      return;
+    }
+    scheduleInformationBoardSave();
+    render();
+  });
 }
 
 async function saveDadUiDraftCompat() {
@@ -2026,8 +2783,12 @@ function wireAiRulesPane(root) {
 function renderBubble(msg, options = {}) {
   const viewerRole = options.viewerRole || state.role;
   const isHiddenForDadInCaregiverView = viewerRole === "caregiver" && msg.hidden_for_dad;
+  const aged = isMessageAged(msg?.created_at);
   const bubble = document.createElement("article");
   bubble.className = `bubble ${msg.sender_role === "caregiver" ? "me" : ""}`;
+  if (aged) {
+    bubble.classList.add("aged");
+  }
   if (isHiddenForDadInCaregiverView) {
     bubble.classList.add("hidden-for-dad-muted");
   }
@@ -2106,6 +2867,13 @@ function renderPendingBubble(msg) {
   meta.textContent = `${senderLabel(msg.sender_role)} · ${formatMessageTime(msg.created_at)} · ${label}`;
   bubble.appendChild(meta);
   return bubble;
+}
+
+function isMessageAged(iso) {
+  const ts = new Date(String(iso || ""));
+  if (!Number.isFinite(ts.getTime())) return false;
+  const ageMs = Date.now() - ts.getTime();
+  return ageMs >= MESSAGE_AGED_DAYS * 24 * 60 * 60 * 1000;
 }
 
 function applyDadUiTokens(threadEl, prefs) {
@@ -3025,6 +3793,7 @@ function startMessageRefreshLoop() {
       state.refreshLoadTimeoutStreak = 0;
       const backgroundTasks = await Promise.allSettled([
         withTimeout(loadRemoteSettings(false), REFRESH_STEP_TIMEOUT_MS, "Load settings"),
+        withTimeout(loadInformationBoard(false), REFRESH_STEP_TIMEOUT_MS, "Load information board"),
         withTimeout(loadDadTypingStatus(false), REFRESH_STEP_TIMEOUT_MS, "Load typing"),
         withTimeout(loadDadOnlineStatus(), REFRESH_STEP_TIMEOUT_MS, "Load online status"),
         withTimeout(emitPresenceHeartbeat(false), REFRESH_STEP_TIMEOUT_MS, "Emit presence"),
@@ -3303,6 +4072,9 @@ function wireDiagnosticsPanel(root, viewerRole) {
 function isUserEditingControl() {
   const active = document.activeElement;
   if (!active) return false;
+  if (active instanceof HTMLElement && active.isContentEditable) {
+    return Boolean(active.closest("#app"));
+  }
   const tag = active.tagName;
   const interactive = ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(tag);
   if (!interactive) return false;
@@ -3572,6 +4344,7 @@ function appStateSignature() {
     messagesSignature(state.messages),
     dadUiSignature(state.appliedDadUI),
     trustRulesSignature(state.trustRules),
+    infoBoardSignature(state.infoBoard),
     state.dadTyping ? "typing" : "idle",
     state.dadOnline ? "dad-online" : "dad-offline",
     String(state.dadAlertUnreadCount || 0),

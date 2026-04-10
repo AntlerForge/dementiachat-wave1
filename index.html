@@ -24,22 +24,33 @@
 
     <template id="dad-view-template">
       <section class="panel">
-        <h2>Dad View</h2>
-        <div id="dadThread" class="thread"></div>
-        <form id="dadComposer" class="composer">
-          <input id="dadInput" autocomplete="off" placeholder="Type message..." />
-          <button type="submit">Send</button>
-        </form>
-        <section class="diagnostics">
-          <details>
-            <summary>Diagnostics</summary>
-            <p id="dadDiagSummary" class="status"></p>
-            <pre id="dadDiagLog" class="diag-log"></pre>
-            <div class="diag-actions">
-              <button id="dadCopyDiagnostics" type="button">Copy diagnostics</button>
+        <div id="dadLayout" class="dad-layout">
+          <section id="dadBoardPane" class="dad-board-pane" hidden>
+            <h3>Information from Tony</h3>
+            <div id="dadBoardScroller" class="info-board-scroller">
+              <div id="dadBoardCanvas" class="info-board-canvas"></div>
+              <svg id="dadBoardArrows" class="info-board-arrows"></svg>
             </div>
-          </details>
-        </section>
+          </section>
+          <section class="dad-chat-pane">
+            <h2>Dad View</h2>
+            <div id="dadThread" class="thread"></div>
+            <form id="dadComposer" class="composer">
+              <input id="dadInput" autocomplete="off" placeholder="Type message..." />
+              <button type="submit">Send</button>
+            </form>
+            <section class="diagnostics">
+              <details>
+                <summary>Diagnostics</summary>
+                <p id="dadDiagSummary" class="status"></p>
+                <pre id="dadDiagLog" class="diag-log"></pre>
+                <div class="diag-actions">
+                  <button id="dadCopyDiagnostics" type="button">Copy diagnostics</button>
+                </div>
+              </details>
+            </section>
+          </section>
+        </div>
       </section>
     </template>
 
@@ -55,6 +66,7 @@
         </div>
         <nav class="tabs" id="tabs">
           <button data-tab="chat" class="active">Chat</button>
+          <button data-tab="info-board">Information from Tony</button>
           <button data-tab="dad-ui">UI Controls</button>
           <button data-tab="ai-rules">AI Rules</button>
         </nav>
@@ -99,6 +111,26 @@
               </div>
             </details>
           </section>
+        </section>
+
+        <section data-pane="info-board" class="pane">
+          <div class="row">
+            <p class="subtext">
+              Caregiver editing only. Drag and resize text/images, then connect text to images using arrows.
+            </p>
+          </div>
+          <div class="info-board-toolbar">
+            <button id="boardAddText" type="button">Add text</button>
+            <button id="boardAddImage" type="button">Add image</button>
+            <button id="boardAddArrow" type="button">Draw arrow</button>
+            <button id="boardDeleteSelected" type="button">Delete selected</button>
+          </div>
+          <input id="boardImageFile" type="file" accept="image/*" hidden />
+          <div id="boardEditorStatus" class="status"></div>
+          <div id="caregiverBoardScroller" class="info-board-scroller">
+            <div id="caregiverBoardCanvas" class="info-board-canvas"></div>
+            <svg id="caregiverBoardArrows" class="info-board-arrows"></svg>
+          </div>
         </section>
 
         <section data-pane="dad-ui" class="pane">
@@ -164,6 +196,23 @@
           </div>
           <button id="applyCaregiverUi" type="button">Apply to caregiver view</button>
           <p id="caregiverUiStatus" class="status"></p>
+          <h3>Information board controls</h3>
+          <div class="row">
+            <label for="boardEnabledForCaregiver">Show board on caregiver view</label>
+            <select id="boardEnabledForCaregiver">
+              <option value="1">Enabled</option>
+              <option value="0">Disabled</option>
+            </select>
+          </div>
+          <div class="row">
+            <label for="boardEnabledForDad">Show board on Dad view (split layout)</label>
+            <select id="boardEnabledForDad">
+              <option value="1">Enabled</option>
+              <option value="0">Disabled</option>
+            </select>
+          </div>
+          <button id="applyBoardVisibility" type="button">Apply board visibility</button>
+          <p id="boardVisibilityStatus" class="status"></p>
           <h3>App versions</h3>
           <div class="row">
             <p id="caregiverVersionInfo" class="status"></p>

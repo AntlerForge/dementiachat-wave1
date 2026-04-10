@@ -117,6 +117,16 @@ create table if not exists trust_rules (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists information_boards (
+  id uuid primary key default gen_random_uuid(),
+  conversation_id uuid not null unique references conversations(id) on delete cascade,
+  enabled_for_dad boolean not null default false,
+  enabled_for_caregiver boolean not null default true,
+  board_payload jsonb not null default '{"schema_version":1,"items":[],"connectors":[],"canvas_height":1200}'::jsonb,
+  updated_by uuid references profiles(id),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists delayed_outbox (
   id uuid primary key default gen_random_uuid(),
   conversation_id uuid not null references conversations(id) on delete cascade,
@@ -638,6 +648,58 @@ begin
 end;
 $$;
 
+create or replace function save_information_board(
+  p_conversation_id uuid,
+  p_enabled_for_dad boolean default false,
+  p_enabled_for_caregiver boolean default true,
+  p_board_payload jsonb default '{}'::jsonb
+)
+returns information_boards
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row information_boards;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated';
+  end if;
+  if not is_caregiver_admin(p_conversation_id) then
+    raise exception 'Only caregiver_admin can edit information board';
+  end if;
+
+  insert into information_boards (
+    conversation_id,
+    enabled_for_dad,
+    enabled_for_caregiver,
+    board_payload,
+    updated_by,
+    updated_at
+  )
+  values (
+    p_conversation_id,
+    coalesce(p_enabled_for_dad, false),
+    coalesce(p_enabled_for_caregiver, true),
+    coalesce(
+      p_board_payload,
+      '{"schema_version":1,"items":[],"connectors":[],"canvas_height":1200}'::jsonb
+    ),
+    auth.uid(),
+    now()
+  )
+  on conflict (conversation_id) do update
+  set enabled_for_dad = excluded.enabled_for_dad,
+      enabled_for_caregiver = excluded.enabled_for_caregiver,
+      board_payload = excluded.board_payload,
+      updated_by = excluded.updated_by,
+      updated_at = now()
+  returning * into v_row;
+
+  return v_row;
+end;
+$$;
+
 create or replace function queue_delayed_auto(
   p_conversation_id uuid,
   p_source_message_id uuid,
@@ -853,6 +915,7 @@ alter table messages enable row level security;
 alter table message_revisions enable row level security;
 alter table dad_ui_profiles enable row level security;
 alter table trust_rules enable row level security;
+alter table information_boards enable row level security;
 alter table delayed_outbox enable row level security;
 alter table activity_events enable row level security;
 alter table push_subscriptions enable row level security;
@@ -952,6 +1015,19 @@ using (is_conversation_member(conversation_id));
 drop policy if exists p_trust_rules_update on trust_rules;
 create policy p_trust_rules_update
 on trust_rules
+for all
+using (is_caregiver_admin(conversation_id))
+with check (is_caregiver_admin(conversation_id));
+
+drop policy if exists p_information_boards_select on information_boards;
+create policy p_information_boards_select
+on information_boards
+for select
+using (is_conversation_member(conversation_id));
+
+drop policy if exists p_information_boards_update on information_boards;
+create policy p_information_boards_update
+on information_boards
 for all
 using (is_caregiver_admin(conversation_id))
 with check (is_caregiver_admin(conversation_id));

@@ -41,4 +41,12 @@ window.APP_CONFIG = {
   // MESSAGE_POLL_MAX_MS: 30000,
   // REMOTE_SETTINGS_POLL_MS: 60000,
   // DAD_TYPING_POLL_MS: 5000,
+  // Auto-scroll and message aging behavior.
+  // DAD_INACTIVE_AUTO_SCROLL_MS: 60000,
+  // CAREGIVER_INACTIVE_AUTO_SCROLL_MS: 60000,
+  // AUTO_SCROLL_SELF_CHECK_MS: 8000,
+  // MESSAGE_AGED_DAYS: 2,
+  // Information board sync/save tuning.
+  // INFO_BOARD_POLL_MS: 30000,
+  // INFO_BOARD_SAVE_DEBOUNCE_MS: 700,
 };
