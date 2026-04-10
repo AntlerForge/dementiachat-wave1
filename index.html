@@ -125,6 +125,15 @@
             <button id="boardAddArrow" type="button">Draw arrow</button>
             <button id="boardDeleteSelected" type="button">Delete selected</button>
           </div>
+          <div class="row">
+            <label for="boardTextInput">Selected text card content</label>
+            <textarea
+              id="boardTextInput"
+              rows="3"
+              placeholder="Type the message for the selected text card, then press Apply text."
+            ></textarea>
+            <button id="boardApplyText" type="button">Apply text</button>
+          </div>
           <input id="boardImageFile" type="file" accept="image/*" hidden />
           <div id="boardEditorStatus" class="status"></div>
           <div id="caregiverBoardScroller" class="info-board-scroller">

@@ -451,6 +451,12 @@ select:focus {
   margin-bottom: 8px;
 }
 
+.info-board-toolbar .active {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #991b1b;
+}
+
 .info-board-scroller {
   position: relative;
   min-height: 420px;
@@ -493,6 +499,12 @@ select:focus {
   line-height: 1.4;
   outline: none;
   white-space: pre-wrap;
+}
+
+#boardTextInput {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
 }
 
 .info-board-image {

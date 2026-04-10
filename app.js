@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.20";
+const APP_VERSION = "wave1-2026-04-02.21";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -261,6 +261,7 @@ const state = {
   infoBoardSelectedConnectorId: "",
   infoBoardArrowFromItemId: "",
   infoBoardImageDraftInFlight: false,
+  infoBoardTextDraft: "",
   messages: [],
   outbox: readJson(OUTBOX_KEY, []),
   conversationId: localStorage.getItem(CONVERSATION_KEY) || null,
@@ -2504,14 +2505,7 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
       const text = document.createElement("div");
       text.className = "info-board-text";
       text.textContent = item.text || "";
-      text.contentEditable = editable ? "true" : "false";
-      if (editable) {
-        text.addEventListener("input", () => {
-          item.text = text.textContent || "";
-          scheduleInformationBoardSave();
-          if (statusEl) statusEl.textContent = state.infoBoardStatus;
-        });
-      }
+      text.contentEditable = "false";
       box.appendChild(text);
     }
 
@@ -2523,11 +2517,13 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
       box.addEventListener("click", (event) => {
         event.stopPropagation();
         handleSelect();
+        let needsRender = false;
         if (state.infoBoardArrowFromItemId) {
           const from = state.infoBoardArrowFromItemId;
           if (from === "__pick_source__") {
             state.infoBoardArrowFromItemId = item.id;
             if (statusEl) statusEl.textContent = "Arrow mode: now click the destination item.";
+            needsRender = true;
           } else if (from && from !== item.id) {
             payload.connectors.push({
               id: `connector-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -2537,9 +2533,10 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
             state.infoBoardArrowFromItemId = "";
             scheduleInformationBoardSave();
             if (statusEl) statusEl.textContent = "Arrow added.";
+            needsRender = true;
           }
         }
-        render();
+        if (needsRender) render();
       });
 
       box.addEventListener("pointerdown", (event) => {
@@ -2621,6 +2618,8 @@ function wireInformationBoardPane(root) {
   const addImageBtn = root.getElementById("boardAddImage");
   const addArrowBtn = root.getElementById("boardAddArrow");
   const deleteSelectedBtn = root.getElementById("boardDeleteSelected");
+  const textInput = root.getElementById("boardTextInput");
+  const applyTextBtn = root.getElementById("boardApplyText");
   const imageFile = root.getElementById("boardImageFile");
   const statusEl = root.getElementById("boardEditorStatus");
   const canvasEl = root.getElementById("caregiverBoardCanvas");
@@ -2638,11 +2637,26 @@ function wireInformationBoardPane(root) {
   addImageBtn.disabled = !editable;
   addArrowBtn.disabled = !editable;
   deleteSelectedBtn.disabled = !editable;
+  if (textInput) textInput.disabled = !editable;
+  if (applyTextBtn) applyTextBtn.disabled = !editable;
   addArrowBtn.textContent = state.infoBoardArrowFromItemId ? "Cancel arrow" : "Draw arrow";
+  addArrowBtn.classList.toggle("active", Boolean(state.infoBoardArrowFromItemId));
+  const selectedTextItem = getBoardItemById(state.infoBoardSelectedItemId);
+  if (textInput) {
+    if (selectedTextItem?.type === "text") {
+      textInput.value = selectedTextItem.text || "";
+      textInput.placeholder = "Edit selected text card";
+    } else {
+      textInput.value = state.infoBoardTextDraft || "";
+      textInput.placeholder = "Select a text card, or Add text to create one.";
+    }
+  }
   statusEl.textContent =
     state.infoBoardStatus ||
     (editable
-      ? "Tip: click Draw arrow, then click source item and destination item."
+      ? `Cards: ${getInformationBoardPayload().items.length}, Arrows: ${
+          getInformationBoardPayload().connectors.length
+        }. Tip: click Draw arrow, then click source card and destination card.`
       : "Board is hidden for caregiver view. Enable it in UI Controls.");
 
   if (canvasEl && arrowsEl && scrollerEl) {
@@ -2657,20 +2671,42 @@ function wireInformationBoardPane(root) {
 
   addTextBtn.addEventListener("click", () => {
     if (!editable) return;
-    const initialText = prompt("Enter note text", "Important note");
-    if (initialText == null) return;
-    const item = createBoardItem("text", { text: String(initialText || "Important note") });
+    const typed = String(textInput?.value || state.infoBoardTextDraft || "").trim();
+    const item = createBoardItem("text", { text: typed || "Important note" });
     state.infoBoardSelectedItemId = item.id;
     state.infoBoardSelectedConnectorId = "";
+    state.infoBoardArrowFromItemId = "";
+    state.infoBoardTextDraft = item.text || "";
+    if (textInput) textInput.value = state.infoBoardTextDraft;
+    statusEl.textContent = "Text card added. Edit in the box above, then press Apply text.";
     scheduleInformationBoardSave();
     render();
-    setTimeout(() => {
-      const target = root.querySelector(`.info-board-item[data-item-id="${item.id}"] .info-board-text`);
-      if (target instanceof HTMLElement) {
-        target.focus();
-      }
-    }, 0);
   });
+
+  if (applyTextBtn && textInput) {
+    applyTextBtn.addEventListener("click", () => {
+      if (!editable) return;
+      const selected = getBoardItemById(state.infoBoardSelectedItemId);
+      const nextText = String(textInput.value || "").trim();
+      state.infoBoardTextDraft = nextText;
+      if (selected && selected.type === "text") {
+        selected.text = nextText || "Important note";
+        scheduleInformationBoardSave();
+        statusEl.textContent = "Text applied to selected card.";
+        render();
+        return;
+      }
+      const item = createBoardItem("text", { text: nextText || "Important note" });
+      state.infoBoardSelectedItemId = item.id;
+      state.infoBoardSelectedConnectorId = "";
+      scheduleInformationBoardSave();
+      statusEl.textContent = "No text card selected, so a new one was created.";
+      render();
+    });
+    textInput.addEventListener("input", () => {
+      state.infoBoardTextDraft = textInput.value;
+    });
+  }
 
   addImageBtn.addEventListener("click", () => {
     if (!editable || !imageFile || state.infoBoardImageDraftInFlight) return;
@@ -2708,7 +2744,20 @@ function wireInformationBoardPane(root) {
           }
         }, 0);
       } catch (err) {
-        statusEl.textContent = `Image add failed: ${String(err?.message || err)}`;
+        try {
+          const file = imageFile.files?.[0];
+          if (!file) throw err;
+          const fallbackEncoded = await encodeImageFileForUpload(file);
+          const item = createBoardItem("image", { image_url: fallbackEncoded });
+          state.infoBoardSelectedItemId = item.id;
+          scheduleInformationBoardSave();
+          statusEl.textContent = `Storage upload failed, but local image card was added: ${String(
+            err?.message || err
+          )}`;
+          render();
+        } catch (fallbackErr) {
+          statusEl.textContent = `Image add failed: ${String(fallbackErr?.message || fallbackErr)}`;
+        }
       } finally {
         state.infoBoardImageDraftInFlight = false;
       }
