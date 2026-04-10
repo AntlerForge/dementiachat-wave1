@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.21";
+const APP_VERSION = "wave1-2026-04-02.22";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -858,8 +858,21 @@ async function saveInformationBoardNow() {
     };
     const { data, error } = await supabase.rpc("save_information_board", payload);
     if (error) throw error;
-    if (data) {
-      state.infoBoard = normalizeInfoBoardState(data);
+    const returnedRow = Array.isArray(data) ? data[0] : data;
+    if (returnedRow && typeof returnedRow === "object") {
+      const normalizedRemote = normalizeInfoBoardState(returnedRow);
+      const remoteHasItems = Number(normalizedRemote?.payload?.items?.length || 0) > 0;
+      const localHasItems = Number(state.infoBoard?.payload?.items?.length || 0) > 0;
+      // Keep local payload if backend response shape is partial/empty; this prevents visible items
+      // being wiped immediately after "Saving..." in clients where RPC returns an unexpected shape.
+      if (remoteHasItems || !localHasItems) {
+        state.infoBoard = normalizedRemote;
+      } else {
+        state.infoBoard.updatedAt = normalizedRemote.updatedAt || state.infoBoard.updatedAt || "";
+        state.infoBoard.updatedBy = normalizedRemote.updatedBy || state.infoBoard.updatedBy || "";
+        state.infoBoard.enabledForDad = normalizedRemote.enabledForDad;
+        state.infoBoard.enabledForCaregiver = normalizedRemote.enabledForCaregiver;
+      }
       persistInformationBoard();
     }
     state.infoBoardDirty = false;
