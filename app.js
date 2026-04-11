@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.27";
+const APP_VERSION = "wave1-2026-04-02.29";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -424,6 +424,11 @@ async function recoverClientPipeline(reason) {
   if (state.recoveringClient) return;
   state.recoveringClient = true;
   try {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session) {
+      state.session = data.session;
+    }
+    
     await emitClientDiagnostic("recover_start", { reason }, { force: true, throttleKey: "recover" });
     await syncMessagesRealtimeSubscription();
     await loadMessages();
@@ -497,13 +502,21 @@ async function init() {
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") return;
       if (!state.session) return;
-      bootstrapRemoteWithLock()
-        .then(() => {
-          render();
-        })
-        .catch((err) => {
-          emitClientDiagnostic("visibility_resync_failed", { error: String(err?.message || err) });
-        });
+      
+      // Actively force the Supabase client to check and renew its token
+      // if the tab was suspended longer than the token lifespan.
+      supabase.auth.getSession().then(({ data }) => {
+        if (data?.session) {
+          state.session = data.session;
+        }
+        return bootstrapRemoteWithLock();
+      })
+      .then(() => {
+        render();
+      })
+      .catch((err) => {
+        emitClientDiagnostic("visibility_resync_failed", { error: String(err?.message || err) });
+      });
     });
   }
   try {
@@ -818,7 +831,7 @@ function persistInformationBoard() {
 
 async function loadInformationBoard(force = false) {
   if (!supabase || !state.conversationId) return;
-  if (state.infoBoardDirty && !force) return;
+  if ((state.infoBoardDirty || state.infoBoardSaveInFlight || state.infoBoardDraggingItem || state.infoBoardSaveQueued) && !force) return;
   const now = Date.now();
   if (!force && now - Number(state.lastInfoBoardFetchAt || 0) < INFO_BOARD_POLL_MS) return;
   state.lastInfoBoardFetchAt = now;
@@ -2485,8 +2498,8 @@ function getBoxIntersection(center, otherCenter, box, padding = 0) {
 function drawInformationBoardArrows(arrowsEl, payload, editable) {
   if (!arrowsEl) return;
   arrowsEl.innerHTML = "";
-  arrowsEl.setAttribute("viewBox", `0 0 1800 ${Math.max(900, Number(payload.canvas_height || 1200))}`);
-  arrowsEl.setAttribute("preserveAspectRatio", "none");
+  arrowsEl.removeAttribute("viewBox");
+  arrowsEl.removeAttribute("preserveAspectRatio");
   const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
   const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
   marker.setAttribute("id", "infoBoardArrowHead");
@@ -2596,7 +2609,8 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         }
         event.preventDefault();
         event.stopPropagation();
-        box.setPointerCapture(event.pointerId);
+        const captureTarget = event.target instanceof Element ? event.target : box;
+        try { captureTarget.setPointerCapture(event.pointerId); } catch(e) {}
         handleSelect();
         
         const startX = event.clientX;
@@ -2626,7 +2640,8 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         const onUp = (upEvent) => {
           window.removeEventListener("pointermove", onMove);
           window.removeEventListener("pointerup", onUp);
-          try { box.releasePointerCapture(upEvent.pointerId); } catch(e) {}
+          window.removeEventListener("pointercancel", onUp);
+          try { captureTarget.releasePointerCapture(upEvent.pointerId); } catch(e) {}
           
           if (hasMoved) {
             state.infoBoardDraggingItem = false;
@@ -2669,6 +2684,7 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         };
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp, { once: true });
+        window.addEventListener("pointercancel", onUp, { once: true });
       });
 
       const resizeHandle = document.createElement("div");
@@ -2676,7 +2692,8 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
       resizeHandle.addEventListener("pointerdown", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        resizeHandle.setPointerCapture(event.pointerId);
+        const captureTarget = event.target instanceof Element ? event.target : resizeHandle;
+        try { captureTarget.setPointerCapture(event.pointerId); } catch(e) {}
         handleSelect();
         const startX = event.clientX;
         const startY = event.clientY;
@@ -2699,7 +2716,8 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         const onUp = (upEvent) => {
           window.removeEventListener("pointermove", onMove);
           window.removeEventListener("pointerup", onUp);
-          try { resizeHandle.releasePointerCapture(upEvent.pointerId); } catch(e) {}
+          window.removeEventListener("pointercancel", onUp);
+          try { captureTarget.releasePointerCapture(upEvent.pointerId); } catch(e) {}
           if (hasMoved) {
             state.infoBoardDraggingItem = false;
             ensureBoardCanvasHeight();
@@ -2713,6 +2731,7 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         };
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp, { once: true });
+        window.addEventListener("pointercancel", onUp, { once: true });
       });
       box.appendChild(resizeHandle);
     }
