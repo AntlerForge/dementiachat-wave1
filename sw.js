@@ -1,4 +1,4 @@
-const CACHE_NAME = "carechat-wave1-v16";
+const CACHE_NAME = "carechat-wave1-v17";
 const ASSETS = [
   "./",
   "./index.html",

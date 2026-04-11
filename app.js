@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.24";
+const APP_VERSION = "wave1-2026-04-02.25";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -345,6 +345,7 @@ const state = {
   lastInfoBoardFetchAt: 0,
   infoBoardSaveTimer: null,
   infoBoardSaveInFlight: false,
+  infoBoardSaveQueued: false,
   infoBoardDirty: false,
 };
 state.infoBoard = normalizeInfoBoardState(state.infoBoard);
@@ -847,7 +848,10 @@ async function loadInformationBoard(force = false) {
 
 async function saveInformationBoardNow() {
   if (!supabase || !state.conversationId || state.role !== "caregiver") return;
-  if (state.infoBoardSaveInFlight) return;
+  if (state.infoBoardSaveInFlight) {
+    state.infoBoardSaveQueued = true;
+    return;
+  }
   state.infoBoardSaveInFlight = true;
   try {
     const payload = {
@@ -882,6 +886,10 @@ async function saveInformationBoardNow() {
     emitClientDiagnostic("info_board_save_failed", { error: String(err?.message || err) });
   } finally {
     state.infoBoardSaveInFlight = false;
+    if (state.infoBoardSaveQueued) {
+      state.infoBoardSaveQueued = false;
+      queueMicrotask(() => saveInformationBoardNow().catch(() => {}));
+    }
   }
 }
 
@@ -2527,33 +2535,6 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         state.infoBoardSelectedItemId = String(item.id);
         state.infoBoardSelectedConnectorId = "";
       };
-      box.addEventListener("click", (event) => {
-        event.stopPropagation();
-        handleSelect();
-        let needsRender = false;
-        if (state.infoBoardArrowFromItemId) {
-          const from = state.infoBoardArrowFromItemId;
-          if (from === "__pick_source__") {
-            state.infoBoardArrowFromItemId = item.id;
-            if (statusEl) statusEl.textContent = "Arrow mode: now click the destination item.";
-            needsRender = true;
-          } else if (from && from !== item.id) {
-            payload.connectors.push({
-              id: `connector-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-              from_item_id: from,
-              to_item_id: item.id,
-            });
-            state.infoBoardArrowFromItemId = "";
-            scheduleInformationBoardSave();
-            if (statusEl) statusEl.textContent = "Arrow added.";
-            needsRender = true;
-          }
-        }
-        if (needsRender) {
-          if (typeof onRequestRender === "function") onRequestRender();
-          else render();
-        }
-      });
 
       box.addEventListener("pointerdown", (event) => {
         const target = event.target;
@@ -2561,26 +2542,68 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
           return;
         }
         event.preventDefault();
+        event.stopPropagation();
         handleSelect();
+        
         const startX = event.clientX;
         const startY = event.clientY;
         const originX = Number(item.x || 0);
         const originY = Number(item.y || 0);
-        item.z = getNextBoardZ();
+        let hasMoved = false;
+
         const onMove = (moveEvent) => {
-          item.x = Math.max(0, originX + (moveEvent.clientX - startX));
-          item.y = Math.max(0, originY + (moveEvent.clientY - startY));
-          box.style.left = `${item.x}px`;
-          box.style.top = `${item.y}px`;
-          drawInformationBoardArrows(arrowsEl, payload, true);
+          const dx = moveEvent.clientX - startX;
+          const dy = moveEvent.clientY - startY;
+          if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+            if (!hasMoved) {
+              item.z = getNextBoardZ();
+              box.style.zIndex = String(Math.max(1, Number(item.z || 1)));
+            }
+            hasMoved = true;
+            item.x = Math.max(0, originX + dx);
+            item.y = Math.max(0, originY + dy);
+            box.style.left = `${item.x}px`;
+            box.style.top = `${item.y}px`;
+            drawInformationBoardArrows(arrowsEl, payload, true);
+          }
         };
+        
         const onUp = () => {
           window.removeEventListener("pointermove", onMove);
           window.removeEventListener("pointerup", onUp);
-          ensureBoardCanvasHeight();
-          scheduleInformationBoardSave();
-          if (typeof onRequestRender === "function") onRequestRender();
-          else render();
+          
+          if (hasMoved) {
+            ensureBoardCanvasHeight();
+            scheduleInformationBoardSave();
+            if (typeof onRequestRender === "function") onRequestRender();
+            else render();
+          } else {
+            let needsRender = false;
+            if (state.infoBoardArrowFromItemId) {
+              const from = state.infoBoardArrowFromItemId;
+              if (from === "__pick_source__") {
+                state.infoBoardArrowFromItemId = item.id;
+                if (statusEl) statusEl.textContent = "Arrow mode: now click the destination item.";
+                needsRender = true;
+              } else if (from && from !== item.id) {
+                payload.connectors.push({
+                  id: `connector-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                  from_item_id: from,
+                  to_item_id: item.id,
+                });
+                state.infoBoardArrowFromItemId = "";
+                scheduleInformationBoardSave();
+                if (statusEl) statusEl.textContent = "Arrow added.";
+                needsRender = true;
+              }
+            } else {
+              needsRender = true;
+            }
+            if (needsRender) {
+              if (typeof onRequestRender === "function") onRequestRender();
+              else render();
+            }
+          }
         };
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp, { once: true });
@@ -2596,20 +2619,31 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         const startY = event.clientY;
         const originW = Number(item.width || 120);
         const originH = Number(item.height || 80);
+        let hasMoved = false;
         const onMove = (moveEvent) => {
-          item.width = Math.max(120, originW + (moveEvent.clientX - startX));
-          item.height = Math.max(80, originH + (moveEvent.clientY - startY));
-          box.style.width = `${item.width}px`;
-          box.style.height = `${item.height}px`;
-          drawInformationBoardArrows(arrowsEl, payload, true);
+          const dx = moveEvent.clientX - startX;
+          const dy = moveEvent.clientY - startY;
+          if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+            hasMoved = true;
+            item.width = Math.max(120, originW + dx);
+            item.height = Math.max(80, originH + dy);
+            box.style.width = `${item.width}px`;
+            box.style.height = `${item.height}px`;
+            drawInformationBoardArrows(arrowsEl, payload, true);
+          }
         };
         const onUp = () => {
           window.removeEventListener("pointermove", onMove);
           window.removeEventListener("pointerup", onUp);
-          ensureBoardCanvasHeight();
-          scheduleInformationBoardSave();
-          if (typeof onRequestRender === "function") onRequestRender();
-          else render();
+          if (hasMoved) {
+            ensureBoardCanvasHeight();
+            scheduleInformationBoardSave();
+            if (typeof onRequestRender === "function") onRequestRender();
+            else render();
+          } else {
+             if (typeof onRequestRender === "function") onRequestRender();
+             else render();
+          }
         };
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp, { once: true });
