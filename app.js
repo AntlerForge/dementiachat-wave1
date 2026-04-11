@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.26";
+const APP_VERSION = "wave1-2026-04-02.27";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -854,12 +854,14 @@ async function saveInformationBoardNow() {
     return;
   }
   state.infoBoardSaveInFlight = true;
+  state.infoBoardDirty = false;
   try {
+    const payloadToSave = sanitizeInfoBoardPayload(state.infoBoard.payload);
     const payload = {
       p_conversation_id: state.conversationId,
       p_enabled_for_dad: Boolean(state.infoBoard.enabledForDad),
       p_enabled_for_caregiver: Boolean(state.infoBoard.enabledForCaregiver),
-      p_board_payload: sanitizeInfoBoardPayload(state.infoBoard.payload),
+      p_board_payload: payloadToSave,
     };
     const { data, error } = await supabase.rpc("save_information_board", payload);
     if (error) throw error;
@@ -868,11 +870,12 @@ async function saveInformationBoardNow() {
       const normalizedRemote = normalizeInfoBoardState(returnedRow);
       const remoteHasItems = Number(normalizedRemote?.payload?.items?.length || 0) > 0;
       const localHasItems = Number(state.infoBoard?.payload?.items?.length || 0) > 0;
-      // Keep local payload if backend response shape is partial/empty; this prevents visible items
-      // being wiped immediately after "Saving..." in clients where RPC returns an unexpected shape.
-      if (remoteHasItems || !localHasItems) {
+      
+      // If user hasn't made new edits during the save, it is safe to sync from remote.
+      if (!state.infoBoardDirty && (remoteHasItems || !localHasItems)) {
         state.infoBoard = normalizedRemote;
       } else {
+        // We have unsaved local changes, keep our payload but sync metadata
         state.infoBoard.updatedAt = normalizedRemote.updatedAt || state.infoBoard.updatedAt || "";
         state.infoBoard.updatedBy = normalizedRemote.updatedBy || state.infoBoard.updatedBy || "";
         state.infoBoard.enabledForDad = normalizedRemote.enabledForDad;
@@ -880,14 +883,14 @@ async function saveInformationBoardNow() {
       }
       persistInformationBoard();
     }
-    state.infoBoardDirty = false;
     state.infoBoardStatus = `Saved ${formatTime(new Date().toISOString())}`;
   } catch (err) {
+    state.infoBoardDirty = true;
     state.infoBoardStatus = `Save failed: ${String(err?.message || err)}`;
     emitClientDiagnostic("info_board_save_failed", { error: String(err?.message || err) });
   } finally {
     state.infoBoardSaveInFlight = false;
-    if (state.infoBoardSaveQueued) {
+    if (state.infoBoardSaveQueued || state.infoBoardDirty) {
       state.infoBoardSaveQueued = false;
       queueMicrotask(() => saveInformationBoardNow().catch(() => {}));
     }
@@ -2456,6 +2459,29 @@ function getBoardItemCenter(item) {
   };
 }
 
+function getBoxIntersection(center, otherCenter, box, padding = 0) {
+  const dx = otherCenter.x - center.x;
+  const dy = otherCenter.y - center.y;
+  
+  const w = Number(box.width) / 2 + padding;
+  const h = Number(box.height) / 2 + padding;
+  
+  if (dx === 0 && dy === 0) return { x: center.x, y: center.y };
+  
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  
+  if (absDx * h > absDy * w) {
+    const x = dx > 0 ? w : -w;
+    const y = x * (dy / dx);
+    return { x: center.x + x, y: center.y + y };
+  } else {
+    const y = dy > 0 ? h : -h;
+    const x = y * (dx / dy);
+    return { x: center.x + x, y: center.y + y };
+  }
+}
+
 function drawInformationBoardArrows(arrowsEl, payload, editable) {
   if (!arrowsEl) return;
   arrowsEl.innerHTML = "";
@@ -2480,13 +2506,17 @@ function drawInformationBoardArrows(arrowsEl, payload, editable) {
     const from = payload.items.find((item) => String(item.id) === String(connector.from_item_id));
     const to = payload.items.find((item) => String(item.id) === String(connector.to_item_id));
     if (!from || !to) return;
+    
     const fromCenter = getBoardItemCenter(from);
     const toCenter = getBoardItemCenter(to);
+    
+    const fromPt = getBoxIntersection(fromCenter, toCenter, from, 0);
+    const toPt = getBoxIntersection(toCenter, fromCenter, to, 4); // 4px padding for arrowhead
+    
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    const midX = fromCenter.x + (toCenter.x - fromCenter.x) * 0.45;
     path.setAttribute(
       "d",
-      `M ${fromCenter.x} ${fromCenter.y} C ${midX} ${fromCenter.y}, ${midX} ${toCenter.y}, ${toCenter.x} ${toCenter.y}`
+      `M ${fromPt.x} ${fromPt.y} L ${toPt.x} ${toPt.y}`
     );
     path.setAttribute("class", "arrow-line");
     path.setAttribute("marker-end", "url(#infoBoardArrowHead)");
