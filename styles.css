@@ -74,6 +74,11 @@ body {
 
 body.dad-board-wide #app {
   max-width: 1660px;
+  min-width: 980px;
+}
+
+body.caregiver-board-wide #app {
+  max-width: 1660px;
 }
 
 .panel {
@@ -463,9 +468,9 @@ select:focus {
 
 .dad-layout.split {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(440px, 1fr) minmax(440px, 1fr);
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .dad-chat-pane {
@@ -493,10 +498,20 @@ select:focus {
   position: relative;
   min-height: 420px;
   height: calc(100vh - 320px);
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #f8fafc;
+}
+
+.dad-layout.split .dad-board-pane .info-board-scroller {
+  min-height: 520px;
+  height: calc(100vh - 245px);
+}
+
+#caregiverBoardScroller {
+  width: min(100%, calc((100% - 12px) / 2));
 }
 
 .info-board-canvas {
@@ -535,7 +550,8 @@ select:focus {
   height: 100%;
   padding: 10px;
   overflow: auto;
-  line-height: 1.4;
+  line-height: 1.35;
+  font-size: 16px;
   outline: none;
   white-space: pre-wrap;
 }
@@ -615,6 +631,12 @@ select:focus {
     padding-bottom: 70px;
   }
 
+  body.dad-board-wide #app,
+  body.caregiver-board-wide #app {
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .thread {
     height: calc(100vh - 360px);
   }
@@ -640,6 +662,10 @@ select:focus {
 
   .dad-layout.split {
     grid-template-columns: 1fr;
+  }
+
+  #caregiverBoardScroller {
+    width: 100%;
   }
 
   .info-board-scroller {

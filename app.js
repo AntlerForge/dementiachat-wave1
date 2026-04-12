@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.36";
+const APP_VERSION = "wave1-2026-04-02.37";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -99,6 +99,10 @@ const DAD_ONLINE_WINDOW_MS = Math.max(60_000, parseMsWithDefault(config.DAD_ONLI
 const DAD_VERSION_STALE_MS = Math.max(
   5 * 60_000,
   parseMsWithDefault(config.DAD_VERSION_STALE_MS, 30 * 60_000)
+);
+const INFO_BOARD_CANVAS_BASE_WIDTH = Math.max(
+  640,
+  parseMsWithDefault(config.INFO_BOARD_CANVAS_BASE_WIDTH, 960)
 );
 const MESSAGE_POLL_ACTIVE_MS = Math.max(
   3_000,
@@ -993,6 +997,13 @@ function render() {
   document.body.classList.toggle(
     "dad-board-wide",
     state.role === "dad" && Boolean(state.infoBoard?.enabledForDad) && !state.authRequired
+  );
+  document.body.classList.toggle(
+    "caregiver-board-wide",
+    state.role === "caregiver" &&
+      state.caregiverTab === "info-board" &&
+      Boolean(state.infoBoard?.enabledForCaregiver) &&
+      !state.authRequired
   );
   updateAppTitle();
   appRoot.innerHTML = "";
@@ -2523,6 +2534,16 @@ function getBoardItemCenter(item) {
   };
 }
 
+function scaleBoardRect(item, scale = 1) {
+  const safeScale = Number.isFinite(Number(scale)) ? Number(scale) : 1;
+  return {
+    x: Number(item.x || 0) * safeScale,
+    y: Number(item.y || 0) * safeScale,
+    width: Number(item.width || 0) * safeScale,
+    height: Number(item.height || 0) * safeScale,
+  };
+}
+
 function getBoxIntersection(center, otherCenter, box, padding = 0) {
   const dx = otherCenter.x - center.x;
   const dy = otherCenter.y - center.y;
@@ -2546,8 +2567,9 @@ function getBoxIntersection(center, otherCenter, box, padding = 0) {
   }
 }
 
-function drawInformationBoardArrows(arrowsEl, payload, editable) {
+function drawInformationBoardArrows(arrowsEl, payload, editable, scale = 1) {
   if (!arrowsEl) return;
+  const safeScale = Math.max(0.4, Number(scale || 1));
   arrowsEl.innerHTML = "";
   arrowsEl.removeAttribute("viewBox");
   arrowsEl.removeAttribute("preserveAspectRatio");
@@ -2570,13 +2592,14 @@ function drawInformationBoardArrows(arrowsEl, payload, editable) {
     const from = payload.items.find((item) => String(item.id) === String(connector.from_item_id));
     const to = payload.items.find((item) => String(item.id) === String(connector.to_item_id));
     if (!from || !to) return;
-    
-    const fromCenter = getBoardItemCenter(from);
-    const toCenter = getBoardItemCenter(to);
-    
-    const fromPt = getBoxIntersection(fromCenter, toCenter, from, 0);
-    const toPt = getBoxIntersection(toCenter, fromCenter, to, 4); // 4px padding for arrowhead
-    
+
+    const fromRect = scaleBoardRect(from, safeScale);
+    const toRect = scaleBoardRect(to, safeScale);
+    const fromCenter = getBoardItemCenter(fromRect);
+    const toCenter = getBoardItemCenter(toRect);
+    const fromPt = getBoxIntersection(fromCenter, toCenter, fromRect, 0);
+    const toPt = getBoxIntersection(toCenter, fromCenter, toRect, Math.max(2, 4 * safeScale));
+
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute(
       "d",
@@ -2584,6 +2607,7 @@ function drawInformationBoardArrows(arrowsEl, payload, editable) {
     );
     path.setAttribute("class", "arrow-line");
     path.setAttribute("marker-end", "url(#infoBoardArrowHead)");
+    path.style.strokeWidth = String(Math.max(1.4, 2.5 * safeScale));
     if (String(connector.id) === String(state.infoBoardSelectedConnectorId)) {
       path.classList.add("selected");
     }
@@ -2602,9 +2626,18 @@ function drawInformationBoardArrows(arrowsEl, payload, editable) {
 function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editable, statusEl, onRequestRender }) {
   if (!canvasEl || !arrowsEl || !scrollerEl) return;
   const payload = getInformationBoardPayload();
+  const canonicalCanvasHeight = Math.max(900, Number(payload.canvas_height || 1200));
+  const availableWidth = Math.max(280, Math.floor(Number(scrollerEl.clientWidth || INFO_BOARD_CANVAS_BASE_WIDTH) - 2));
+  const boardScale = Math.max(0.4, Math.min(1, availableWidth / INFO_BOARD_CANVAS_BASE_WIDTH));
+  const renderedCanvasWidth = Math.round(INFO_BOARD_CANVAS_BASE_WIDTH * boardScale);
+  const renderedCanvasHeight = Math.round(canonicalCanvasHeight * boardScale);
   canvasEl.innerHTML = "";
-  canvasEl.style.minHeight = `${Math.max(900, Number(payload.canvas_height || 1200))}px`;
-  drawInformationBoardArrows(arrowsEl, payload, editable);
+  canvasEl.style.width = `${renderedCanvasWidth}px`;
+  canvasEl.style.minHeight = `${renderedCanvasHeight}px`;
+  canvasEl.style.height = `${renderedCanvasHeight}px`;
+  arrowsEl.style.width = `${renderedCanvasWidth}px`;
+  arrowsEl.style.height = `${renderedCanvasHeight}px`;
+  drawInformationBoardArrows(arrowsEl, payload, editable, boardScale);
 
   if (!payload.items.length) {
     const empty = document.createElement("div");
@@ -2627,10 +2660,10 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
     if (String(item.id) === String(state.infoBoardArrowFromItemId)) {
       box.classList.add("arrow-source");
     }
-    box.style.left = `${item.x}px`;
-    box.style.top = `${item.y}px`;
-    box.style.width = `${item.width}px`;
-    box.style.height = `${item.height}px`;
+    box.style.left = `${Math.round(Number(item.x || 0) * boardScale)}px`;
+    box.style.top = `${Math.round(Number(item.y || 0) * boardScale)}px`;
+    box.style.width = `${Math.round(Number(item.width || 0) * boardScale)}px`;
+    box.style.height = `${Math.round(Number(item.height || 0) * boardScale)}px`;
     box.style.zIndex = String(Math.max(1, Number(item.z || 1)));
 
     if (item.type === "image") {
@@ -2671,8 +2704,8 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         let hasMoved = false;
 
         const onMove = (moveEvent) => {
-          const dx = moveEvent.clientX - startX;
-          const dy = moveEvent.clientY - startY;
+          const dx = (moveEvent.clientX - startX) / boardScale;
+          const dy = (moveEvent.clientY - startY) / boardScale;
           if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
             if (!hasMoved) {
               state.infoBoardDraggingItem = true;
@@ -2682,9 +2715,9 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
             hasMoved = true;
             item.x = Math.max(0, originX + dx);
             item.y = Math.max(0, originY + dy);
-            box.style.left = `${item.x}px`;
-            box.style.top = `${item.y}px`;
-            drawInformationBoardArrows(arrowsEl, payload, true);
+            box.style.left = `${Math.round(item.x * boardScale)}px`;
+            box.style.top = `${Math.round(item.y * boardScale)}px`;
+            drawInformationBoardArrows(arrowsEl, payload, true, boardScale);
           }
         };
         
@@ -2752,16 +2785,16 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
         const originH = Number(item.height || 80);
         let hasMoved = false;
         const onMove = (moveEvent) => {
-          const dx = moveEvent.clientX - startX;
-          const dy = moveEvent.clientY - startY;
+          const dx = (moveEvent.clientX - startX) / boardScale;
+          const dy = (moveEvent.clientY - startY) / boardScale;
           if (Math.abs(dx) > 8 || Math.abs(dy) > 8) {
             if (!hasMoved) state.infoBoardDraggingItem = true;
             hasMoved = true;
             item.width = Math.max(120, originW + dx);
             item.height = Math.max(80, originH + dy);
-            box.style.width = `${item.width}px`;
-            box.style.height = `${item.height}px`;
-            drawInformationBoardArrows(arrowsEl, payload, true);
+            box.style.width = `${Math.round(item.width * boardScale)}px`;
+            box.style.height = `${Math.round(item.height * boardScale)}px`;
+            drawInformationBoardArrows(arrowsEl, payload, true, boardScale);
           }
         };
         const onUp = (upEvent) => {
