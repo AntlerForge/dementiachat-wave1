@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.34";
+const APP_VERSION = "wave1-2026-04-02.35";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -34,18 +34,6 @@ const appTitle = document.getElementById("appTitle");
 const demoBanner = document.getElementById("demoBanner");
 const exitDemoBtn = document.getElementById("exitDemoBtn");
 
-if (demoBanner) {
-  demoBanner.hidden = !forceLocalMode;
-}
-if (exitDemoBtn) {
-  exitDemoBtn.addEventListener("click", () => {
-    localStorage.removeItem(LOCAL_MODE_KEY);
-    const url = new URL(window.location.href);
-    url.searchParams.delete("local");
-    url.searchParams.set("cloud", "1");
-    window.location.href = url.toString();
-  });
-}
 let activeMessageMenu = null;
 let activeMenuOutsideHandler = null;
 let activeMenuEscapeHandler = null;
@@ -247,6 +235,19 @@ const supabase = hasSupabaseConfig
       },
     })
   : null;
+
+if (demoBanner) {
+  demoBanner.hidden = !forceLocalMode;
+}
+if (exitDemoBtn) {
+  exitDemoBtn.addEventListener("click", () => {
+    localStorage.removeItem(LOCAL_MODE_KEY);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("local");
+    url.searchParams.set("cloud", "1");
+    window.location.href = url.toString();
+  });
+}
 
 function getOrCreateDeviceId() {
   try {
