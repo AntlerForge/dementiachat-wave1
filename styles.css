@@ -33,6 +33,29 @@ body {
   font-size: 1.2rem;
 }
 
+.demo-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.danger {
+  background: #dc2626 !important;
+  color: white !important;
+  border-color: #b91c1c !important;
+}
+
+.danger:hover {
+  background: #b91c1c !important;
+}
+
 .role-picker {
   display: flex;
   align-items: center;
