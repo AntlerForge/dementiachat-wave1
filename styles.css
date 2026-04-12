@@ -46,6 +46,10 @@ body {
   font-size: 0.9rem;
 }
 
+.demo-banner[hidden] {
+  display: none;
+}
+
 .danger {
   background: #dc2626 !important;
   color: white !important;
@@ -118,6 +122,11 @@ body.dad-board-wide #app {
 .presence-text {
   font-size: 0.85rem;
   color: #334155;
+}
+
+.presence-text.stale {
+  color: #b91c1c;
+  font-weight: 600;
 }
 
 .subtext {

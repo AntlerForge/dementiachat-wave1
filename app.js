@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.35";
+const APP_VERSION = "wave1-2026-04-02.36";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -96,6 +96,10 @@ const RUNTIME_VERSION_CHECK_MS = Math.max(
 );
 const PRESENCE_HEARTBEAT_MS = Math.max(15_000, parseMsWithDefault(config.PRESENCE_HEARTBEAT_MS, 45_000));
 const DAD_ONLINE_WINDOW_MS = Math.max(60_000, parseMsWithDefault(config.DAD_ONLINE_WINDOW_MS, 180_000));
+const DAD_VERSION_STALE_MS = Math.max(
+  5 * 60_000,
+  parseMsWithDefault(config.DAD_VERSION_STALE_MS, 30 * 60_000)
+);
 const MESSAGE_POLL_ACTIVE_MS = Math.max(
   3_000,
   parseMsWithDefault(config.MESSAGE_POLL_MS, 7_000)
@@ -239,12 +243,44 @@ const supabase = hasSupabaseConfig
 if (demoBanner) {
   demoBanner.hidden = !forceLocalMode;
 }
+function resetLocalDemoStateForCloud() {
+  const keysToClear = [
+    LOCAL_MODE_KEY,
+    LOCAL_MSG_KEY,
+    OUTBOX_KEY,
+    INFO_BOARD_KEY,
+    CONVERSATION_KEY,
+    AUTH_CODE_KEY,
+    DAD_LAST_MSG_AT_KEY,
+    DAD_LAST_MSG_ID_KEY,
+    CAREGIVER_LAST_MSG_AT_KEY,
+    CAREGIVER_LAST_MSG_ID_KEY,
+  ];
+  for (const key of keysToClear) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* noop */
+    }
+  }
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i) || "";
+      if (key.startsWith("sb-") && key.includes("-auth-token")) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch {
+    /* noop */
+  }
+}
 if (exitDemoBtn) {
   exitDemoBtn.addEventListener("click", () => {
-    localStorage.removeItem(LOCAL_MODE_KEY);
+    resetLocalDemoStateForCloud();
     const url = new URL(window.location.href);
     url.searchParams.delete("local");
     url.searchParams.set("cloud", "1");
+    url.searchParams.set("reset", String(Date.now()));
     window.location.href = url.toString();
   });
 }
@@ -1511,6 +1547,7 @@ function renderCaregiverView() {
   const dadTypingIndicator = node.getElementById("dadTypingIndicator");
   const dadOnlineDot = node.getElementById("dadOnlineDot");
   const dadOnlineText = node.getElementById("dadOnlineText");
+  const dadVersionQuick = node.getElementById("dadVersionQuick");
   applyUiFontScale(panel, state.caregiverUI.uiFontScale, 16);
   applyCaregiverUiTokens(thread, state.caregiverUI);
   if (infoBoardTabButton) {
@@ -1629,6 +1666,11 @@ function renderCaregiverView() {
     dadOnlineDot.classList.toggle("offline", !state.dadOnline);
     const lastSeen = state.dadLastPresenceAt ? ` (last seen ${formatTime(state.dadLastPresenceAt)})` : "";
     dadOnlineText.textContent = state.dadOnline ? "Dad: online" : `Dad: offline${lastSeen}`;
+  }
+  if (dadVersionQuick) {
+    const versionLabel = getDadVersionDisplayLabel();
+    dadVersionQuick.textContent = `Dad app: ${versionLabel}`;
+    dadVersionQuick.classList.toggle("stale", isDadVersionStale());
   }
 
   outboxStatus.textContent = outboxSummary();
@@ -2337,11 +2379,8 @@ function wireCaregiverUiPane(root) {
     caregiverVersionInfo.textContent = `This caregiver app: ${APP_VERSION}`;
   }
   if (dadVersionInfo) {
-    const dadVersion = state.versionStatus?.dad?.version || "unknown";
-    const dadSeenAt = state.versionStatus?.dad?.seenAt
-      ? ` (last seen ${formatTime(state.versionStatus.dad.seenAt)})`
-      : "";
-    dadVersionInfo.textContent = `Dad app latest seen: ${dadVersion}${dadSeenAt}`;
+    const suffix = isDadVersionStale() ? " [STALE]" : "";
+    dadVersionInfo.textContent = `Dad app latest seen: ${getDadVersionDisplayLabel()}${suffix}`;
   }
   if (refreshVersionInfo) {
     refreshVersionInfo.addEventListener("click", async () => {
@@ -4208,6 +4247,27 @@ async function loadVersionStatus(force = false) {
   }
 }
 
+function isDadVersionStale() {
+  const seenAt = String(state.versionStatus?.dad?.seenAt || "");
+  const version = String(state.versionStatus?.dad?.version || "");
+  if (!seenAt || !version || version === "unknown") return true;
+  const seenMs = new Date(seenAt).getTime();
+  if (!Number.isFinite(seenMs)) return true;
+  return Date.now() - seenMs > DAD_VERSION_STALE_MS;
+}
+
+function getDadVersionDisplayLabel() {
+  const version = String(state.versionStatus?.dad?.version || "unknown");
+  const seenAt = String(state.versionStatus?.dad?.seenAt || "");
+  if (!seenAt || version === "unknown") return "unknown (no recent heartbeat)";
+  const seenMs = new Date(seenAt).getTime();
+  if (!Number.isFinite(seenMs)) return `${version} (time unknown)`;
+  const ageMs = Math.max(0, Date.now() - seenMs);
+  const minutes = Math.floor(ageMs / 60_000);
+  const ageLabel = minutes < 1 ? "just now" : `${minutes}m ago`;
+  return `${version} (${ageLabel})`;
+}
+
 function isDadRoleLocked() {
   return Boolean(
     state.roleLockEnabled && (state.profile?.role === "dad" || state.roleHint === "dad")
@@ -4245,13 +4305,16 @@ function updateAppTitle() {
 
 function diagnosticSummaryText(viewerRole) {
   const role = String(viewerRole || state.role || "");
+  const mode = forceLocalMode ? "local-demo" : "cloud";
   const permission = typeof Notification === "undefined" ? "unsupported" : Notification.permission;
   const session = state.session ? "yes" : "no";
   const conv = state.conversationId ? String(state.conversationId).slice(0, 8) : "none";
   const refresh = state.refreshInFlight ? "busy" : "idle";
   const outbox = `${state.outbox?.length || 0} (${state.outboxSyncInFlight ? "syncing" : "idle"})`;
   const dadSeen = state.dadLastPresenceAt ? formatTime(state.dadLastPresenceAt) : "n/a";
+  const dadVersion = getDadVersionDisplayLabel();
   return [
+    `mode=${mode}`,
     `view=${role}`,
     `session=${session}`,
     `conversation=${conv}`,
@@ -4260,6 +4323,7 @@ function diagnosticSummaryText(viewerRole) {
     `pushPerm=${permission}`,
     `pushSubscribed=${state.pushSubscribed ? "yes" : "no"}`,
     `dadOnline=${state.dadOnline ? "yes" : "no"}@${dadSeen}`,
+    `dadVersion=${dadVersion}`,
   ].join(" | ");
 }
 
