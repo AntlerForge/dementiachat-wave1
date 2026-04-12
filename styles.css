@@ -469,7 +469,11 @@ select:focus {
 
 .info-board-canvas {
   position: relative;
+  width: 960px;
   min-height: 1200px;
+  background: #ffffff;
+  border-right: 2px dashed #cbd5e1;
+  border-bottom: 2px dashed #cbd5e1;
 }
 
 .info-board-item {
@@ -532,7 +536,7 @@ select:focus {
 .info-board-arrows {
   position: absolute;
   inset: 0;
-  width: 100%;
+  width: 960px;
   height: 100%;
   pointer-events: none;
 }
