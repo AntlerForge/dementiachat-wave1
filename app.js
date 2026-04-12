@@ -424,10 +424,15 @@ async function recoverClientPipeline(reason) {
   if (state.recoveringClient) return;
   state.recoveringClient = true;
   try {
-    const { data } = await supabase.auth.getSession();
-    if (data?.session) {
-      state.session = data.session;
-    }
+      const { data } = await supabase.auth.getSession();
+      if (data?.session) {
+        state.session = data.session;
+      } else {
+        state.session = null;
+        state.authRequired = true;
+        render();
+        return;
+      }
     
     await emitClientDiagnostic("recover_start", { reason }, { force: true, throttleKey: "recover" });
     await syncMessagesRealtimeSubscription();
@@ -508,13 +513,13 @@ async function init() {
       supabase.auth.getSession().then(({ data }) => {
         if (data?.session) {
           state.session = data.session;
+          return bootstrapRemoteWithLock().then(() => render());
+        } else {
+          state.session = null;
+          state.authRequired = true;
+          render();
         }
-        return bootstrapRemoteWithLock();
-      })
-      .then(() => {
-        render();
-      })
-      .catch((err) => {
+      }).catch((err) => {
         emitClientDiagnostic("visibility_resync_failed", { error: String(err?.message || err) });
       });
     });
