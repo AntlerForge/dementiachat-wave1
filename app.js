@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.38";
+const APP_VERSION = "wave1-2026-04-02.39";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -49,6 +49,7 @@ let ensureConversationPromise = null;
 let bootstrapRemotePromise = null;
 let pendingAuthSync = null;
 let authSyncScheduled = false;
+let boardReflowRaf = 0;
 let dadFallbackPopupEl = null;
 let dadAttentionTitleTimer = null;
 let dadAttentionTitleFlip = false;
@@ -544,6 +545,24 @@ function scheduleAuthStateSync(evt, session) {
   }, 0);
 }
 
+function isInfoBoardVisibleForCurrentRole() {
+  if (state.authRequired) return false;
+  if (state.role === "dad") return Boolean(state.infoBoard?.enabledForDad);
+  if (state.role === "caregiver") {
+    return state.caregiverTab === "info-board" && Boolean(state.infoBoard?.enabledForCaregiver);
+  }
+  return false;
+}
+
+function scheduleBoardReflow() {
+  if (!isInfoBoardVisibleForCurrentRole()) return;
+  if (boardReflowRaf) return;
+  boardReflowRaf = requestAnimationFrame(() => {
+    boardReflowRaf = 0;
+    if (isInfoBoardVisibleForCurrentRole()) render();
+  });
+}
+
 init().catch((err) => {
   console.error(err);
   showFatalStartupError(err);
@@ -562,6 +581,7 @@ async function init() {
     });
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") return;
+      scheduleBoardReflow();
       if (!state.session) return;
       
       // Actively force the Supabase client to check and renew its token
@@ -580,6 +600,19 @@ async function init() {
       });
     });
   }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") scheduleBoardReflow();
+  });
+  window.addEventListener("focus", () => {
+    scheduleBoardReflow();
+  });
+  window.addEventListener(
+    "resize",
+    () => {
+      scheduleBoardReflow();
+    },
+    { passive: true }
+  );
   try {
     await bootstrapRemoteWithLock();
     enforceRoleLock();
@@ -2637,11 +2670,13 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
   const payload = getInformationBoardPayload();
   const canonicalCanvasHeight = Math.max(900, Number(payload.canvas_height || 1200));
   const measuredWidth = Math.floor(Number(scrollerEl.clientWidth || 0));
-  if (measuredWidth < 160) return;
+  const measuredHeight = Math.floor(Number(scrollerEl.clientHeight || 0));
+  if (measuredWidth < 160 || measuredHeight < 160) return;
   const availableWidth = Math.max(280, measuredWidth - 2);
   const boardScale = Math.max(0.4, Math.min(1, availableWidth / INFO_BOARD_CANVAS_BASE_WIDTH));
   const renderedCanvasWidth = Math.round(INFO_BOARD_CANVAS_BASE_WIDTH * boardScale);
-  const renderedCanvasHeight = Math.round(canonicalCanvasHeight * boardScale);
+  const renderedCanonicalHeight = Math.round(canonicalCanvasHeight * boardScale);
+  const renderedCanvasHeight = Math.max(renderedCanonicalHeight, Math.max(360, measuredHeight - 2));
   canvasEl.innerHTML = "";
   canvasEl.style.width = `${renderedCanvasWidth}px`;
   canvasEl.style.minHeight = `${renderedCanvasHeight}px`;
@@ -2686,6 +2721,8 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
     } else {
       const text = document.createElement("div");
       text.className = "info-board-text";
+      text.style.fontSize = `${Math.max(12, Math.round(16 * boardScale))}px`;
+      text.style.padding = `${Math.max(6, Math.round(10 * boardScale))}px`;
       text.textContent = item.text || "";
       text.contentEditable = "false";
       box.appendChild(text);
