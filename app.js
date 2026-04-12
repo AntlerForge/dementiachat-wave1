@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.37";
+const APP_VERSION = "wave1-2026-04-02.38";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -1454,14 +1454,8 @@ function renderDadView() {
   applyDadUiTokens(thread, state.appliedDadUI);
 
   const showBoard = Boolean(state.infoBoard?.enabledForDad);
-  if (dadLayout) {
-    dadLayout.classList.toggle("split", showBoard);
-  }
-  if (dadBoardPane) {
-    dadBoardPane.hidden = !showBoard;
-  }
-  document.body.classList.toggle("dad-board-wide", showBoard);
-  if (showBoard && dadBoardCanvas && dadBoardArrows && dadBoardScroller) {
+  const paintDadBoard = () => {
+    if (!showBoard || !dadBoardCanvas || !dadBoardArrows || !dadBoardScroller) return;
     renderInformationBoardSurface({
       canvasEl: dadBoardCanvas,
       arrowsEl: dadBoardArrows,
@@ -1469,7 +1463,14 @@ function renderDadView() {
       editable: false,
       statusEl: null,
     });
+  };
+  if (dadLayout) {
+    dadLayout.classList.toggle("split", showBoard);
   }
+  if (dadBoardPane) {
+    dadBoardPane.hidden = !showBoard;
+  }
+  document.body.classList.toggle("dad-board-wide", showBoard);
 
   let visibleCount = 0;
   for (const msg of state.messages) {
@@ -1526,6 +1527,9 @@ function renderDadView() {
   });
 
   appRoot.appendChild(node);
+  if (showBoard) {
+    requestAnimationFrame(paintDadBoard);
+  }
   if (state.dadStickToBottom) {
     scrollThreadToBottom(thread);
   }
@@ -1601,6 +1605,11 @@ function renderCaregiverView() {
     panes.forEach((p) => {
       p.classList.toggle("active", p.dataset.pane === safeTab);
     });
+    tabs.dispatchEvent(
+      new CustomEvent("caregiver-tab-changed", {
+        detail: { tab: safeTab },
+      })
+    );
   };
 
   setCaregiverTab(state.caregiverTab);
@@ -2627,7 +2636,9 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
   if (!canvasEl || !arrowsEl || !scrollerEl) return;
   const payload = getInformationBoardPayload();
   const canonicalCanvasHeight = Math.max(900, Number(payload.canvas_height || 1200));
-  const availableWidth = Math.max(280, Math.floor(Number(scrollerEl.clientWidth || INFO_BOARD_CANVAS_BASE_WIDTH) - 2));
+  const measuredWidth = Math.floor(Number(scrollerEl.clientWidth || 0));
+  if (measuredWidth < 160) return;
+  const availableWidth = Math.max(280, measuredWidth - 2);
   const boardScale = Math.max(0.4, Math.min(1, availableWidth / INFO_BOARD_CANVAS_BASE_WIDTH));
   const renderedCanvasWidth = Math.round(INFO_BOARD_CANVAS_BASE_WIDTH * boardScale);
   const renderedCanvasHeight = Math.round(canonicalCanvasHeight * boardScale);
@@ -2910,7 +2921,26 @@ function wireInformationBoardPane(root) {
     }
     refreshEditorUi();
   };
-  refreshBoardSurface();
+  const scheduleBoardSurfaceRefresh = () => {
+    requestAnimationFrame(() => {
+      refreshBoardSurface();
+    });
+  };
+  refreshEditorUi();
+  scheduleBoardSurfaceRefresh();
+
+  const tabsEl = root.getElementById("tabs");
+  if (tabsEl) {
+    tabsEl.addEventListener("caregiver-tab-changed", (event) => {
+      if (event?.detail?.tab !== "info-board") return;
+      scheduleBoardSurfaceRefresh();
+    });
+    tabsEl.addEventListener("click", (event) => {
+      const tab = event.target?.dataset?.tab;
+      if (tab !== "info-board") return;
+      scheduleBoardSurfaceRefresh();
+    });
+  }
   
   if (saveBtn) {
     saveBtn.addEventListener("click", async () => {
