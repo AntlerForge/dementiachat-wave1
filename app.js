@@ -25,7 +25,7 @@ const DAD_LAST_MSG_ID_KEY = "carechat.dad_last_msg_id";
 const CAREGIVER_LAST_MSG_AT_KEY = "carechat.caregiver_last_msg_at";
 const CAREGIVER_LAST_MSG_ID_KEY = "carechat.caregiver_last_msg_id";
 const DAD_ALERT_PROMPTED_AT_KEY = "carechat.dad_alert_prompted_at";
-const APP_VERSION = "wave1-2026-04-02.39";
+const APP_VERSION = "wave1-2026-04-02.40";
 
 const appRoot = document.getElementById("app");
 const roleSelect = document.getElementById("role");
@@ -2609,7 +2609,7 @@ function getBoxIntersection(center, otherCenter, box, padding = 0) {
   }
 }
 
-function drawInformationBoardArrows(arrowsEl, payload, editable, scale = 1) {
+function drawInformationBoardArrows(arrowsEl, payload, editable, scale = 1, rectOverrides = null) {
   if (!arrowsEl) return;
   const safeScale = Math.max(0.4, Number(scale || 1));
   arrowsEl.innerHTML = "";
@@ -2635,8 +2635,8 @@ function drawInformationBoardArrows(arrowsEl, payload, editable, scale = 1) {
     const to = payload.items.find((item) => String(item.id) === String(connector.to_item_id));
     if (!from || !to) return;
 
-    const fromRect = scaleBoardRect(from, safeScale);
-    const toRect = scaleBoardRect(to, safeScale);
+    const fromRect = rectOverrides?.[String(from.id)] || scaleBoardRect(from, safeScale);
+    const toRect = rectOverrides?.[String(to.id)] || scaleBoardRect(to, safeScale);
     const fromCenter = getBoardItemCenter(fromRect);
     const toCenter = getBoardItemCenter(toRect);
     const fromPt = getBoxIntersection(fromCenter, toCenter, fromRect, 0);
@@ -2683,9 +2683,9 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
   canvasEl.style.height = `${renderedCanvasHeight}px`;
   arrowsEl.style.width = `${renderedCanvasWidth}px`;
   arrowsEl.style.height = `${renderedCanvasHeight}px`;
-  drawInformationBoardArrows(arrowsEl, payload, editable, boardScale);
 
   if (!payload.items.length) {
+    drawInformationBoardArrows(arrowsEl, payload, editable, boardScale);
     const empty = document.createElement("div");
     empty.className = "info-board-empty";
     empty.textContent = editable
@@ -2695,6 +2695,8 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
     return;
   }
 
+  const rectOverrides = Object.create(null);
+  let maxRenderedBottom = renderedCanvasHeight;
   const itemsSorted = [...payload.items].sort((a, b) => Number(a.z || 1) - Number(b.z || 1));
   itemsSorted.forEach((item) => {
     const box = document.createElement("article");
@@ -2706,10 +2708,15 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
     if (String(item.id) === String(state.infoBoardArrowFromItemId)) {
       box.classList.add("arrow-source");
     }
-    box.style.left = `${Math.round(Number(item.x || 0) * boardScale)}px`;
-    box.style.top = `${Math.round(Number(item.y || 0) * boardScale)}px`;
-    box.style.width = `${Math.round(Number(item.width || 0) * boardScale)}px`;
-    box.style.height = `${Math.round(Number(item.height || 0) * boardScale)}px`;
+    const renderedRect = scaleBoardRect(item, boardScale);
+    renderedRect.x = Math.round(renderedRect.x);
+    renderedRect.y = Math.round(renderedRect.y);
+    renderedRect.width = Math.max(48, Math.round(renderedRect.width));
+    renderedRect.height = Math.max(40, Math.round(renderedRect.height));
+    box.style.left = `${renderedRect.x}px`;
+    box.style.top = `${renderedRect.y}px`;
+    box.style.width = `${renderedRect.width}px`;
+    box.style.height = `${renderedRect.height}px`;
     box.style.zIndex = String(Math.max(1, Number(item.z || 1)));
 
     if (item.type === "image") {
@@ -2723,10 +2730,28 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
       text.className = "info-board-text";
       text.style.fontSize = `${Math.max(12, Math.round(16 * boardScale))}px`;
       text.style.padding = `${Math.max(6, Math.round(10 * boardScale))}px`;
+      text.style.overflow = "hidden";
       text.textContent = item.text || "";
       text.contentEditable = "false";
       box.appendChild(text);
     }
+    canvasEl.appendChild(box);
+
+    if (item.type === "text") {
+      const textEl = box.querySelector(".info-board-text");
+      if (textEl) {
+        const requiredHeight = Math.ceil(textEl.scrollHeight + 2);
+        if (requiredHeight > renderedRect.height) {
+          renderedRect.height = requiredHeight;
+          box.style.height = `${requiredHeight}px`;
+        }
+      }
+    }
+    rectOverrides[String(item.id)] = renderedRect;
+    maxRenderedBottom = Math.max(
+      maxRenderedBottom,
+      renderedRect.y + renderedRect.height + Math.max(24, Math.round(80 * boardScale))
+    );
 
     if (editable) {
       const handleSelect = () => {
@@ -2867,8 +2892,15 @@ function renderInformationBoardSurface({ canvasEl, arrowsEl, scrollerEl, editabl
       });
       box.appendChild(resizeHandle);
     }
-    canvasEl.appendChild(box);
   });
+
+  const adjustedCanvasHeight = Math.max(renderedCanvasHeight, Math.round(maxRenderedBottom));
+  if (adjustedCanvasHeight !== renderedCanvasHeight) {
+    canvasEl.style.minHeight = `${adjustedCanvasHeight}px`;
+    canvasEl.style.height = `${adjustedCanvasHeight}px`;
+    arrowsEl.style.height = `${adjustedCanvasHeight}px`;
+  }
+  drawInformationBoardArrows(arrowsEl, payload, editable, boardScale, rectOverrides);
 
   if (editable) {
     canvasEl.addEventListener("click", () => {
